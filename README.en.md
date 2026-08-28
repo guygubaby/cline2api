@@ -88,6 +88,19 @@ Model:    <model from the synced list, e.g. stealth/ox-alpha>
 
 Both OpenAI and Anthropic API formats are supported.
 
+### API protocol compatibility
+
+| Protocol | Standard endpoint | Supported core calls |
+|----------|-------------------|----------------------|
+| OpenAI Chat Completions | `POST /v1/chat/completions` | Text, multimodal images, custom function tools, parallel tool calls, streaming |
+| OpenAI Responses | `POST /v1/responses` | `input` / `instructions`, multimodal images, `reasoning.effort`, `text.format`, custom functions and `function_call_output`, standard Responses SSE lifecycle |
+| Anthropic Messages | `POST /v1/messages` | System/content blocks, base64/URL images, `stop_sequences`, `output_config`, client tools, multiple `tool_result` blocks, standard Messages SSE lifecycle |
+| Anthropic Token Count | `POST /v1/messages/count_tokens` | Standard `{ "input_tokens": number }` shape using a local approximation |
+
+Authentication accepts both OpenAI's `Authorization: Bearer <key>` and Anthropic's `x-api-key: <key>`. Anthropic SDKs may send the usual `anthropic-version` and `anthropic-beta` headers.
+
+> The upstream is a Chat Completions service, so features requiring vendor-side state or hosted execution cannot be faithfully emulated. OpenAI `background`, `previous_response_id`, `conversation`, and hosted tools, plus Anthropic server tools, containers, and Skills, return a standard error instead of being silently dropped. For stateless multi-turn Responses calls, send previous output items back in the next `input`.
+
 ### 3. Account export/import (device migration)
 
 - **Export**: click "Export" on the Accounts page to download `cline-accounts-export.json`

@@ -89,6 +89,19 @@ Model:    cline-free/glm-5.2
 
 兼容 OpenAI 和 Anthropic 两种 API 格式。
 
+### API 协议兼容
+
+| 协议 | 标准端点 | 已支持的核心调用 |
+|------|----------|------------------|
+| OpenAI Chat Completions | `POST /v1/chat/completions` | 文本、多模态图片、自定义函数工具、并行工具调用、流式输出 |
+| OpenAI Responses | `POST /v1/responses` | `input` / `instructions`、多模态图片、`reasoning.effort`、`text.format`、自定义函数与 `function_call_output`、标准 Responses SSE 生命周期 |
+| Anthropic Messages | `POST /v1/messages` | system/content blocks、base64/URL 图片、`stop_sequences`、`output_config`、客户端工具、多个 `tool_result`、标准 Messages SSE 生命周期 |
+| Anthropic Token Count | `POST /v1/messages/count_tokens` | 返回标准 `{ "input_tokens": number }` 结构（本地近似估算） |
+
+鉴权同时接受 OpenAI 的 `Authorization: Bearer <key>` 和 Anthropic 的 `x-api-key: <key>`；Anthropic SDK 可照常发送 `anthropic-version`、`anthropic-beta` 请求头。
+
+> 上游实际是 Chat Completions，因此无法可靠模拟需要厂商服务端状态或托管执行环境的功能。OpenAI 的 `background`、`previous_response_id`、`conversation`、托管工具，以及 Anthropic 的服务端工具、容器/Skill 等请求会返回标准错误，不会静默丢弃。Responses 可通过在下一次 `input` 中回传之前的 output items 实现无状态多轮调用。
+
 ### 3. 账号导出/导入（跨设备迁移）
 
 - **导出**：账号管理页面点击「导出」按钮，下载 `cline-accounts-export.json`

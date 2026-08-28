@@ -287,12 +287,12 @@ func startProxy(host string, port int) error {
 			}
 
 			if !valid {
-				writeJSON(w, http.StatusUnauthorized, map[string]any{
-					"error": map[string]string{
-						"message": "invalid API key. Generate one at /admin/ or set x-api-key header",
-						"type":    "auth_error",
-					},
-				})
+				message := "invalid API key. Generate one at /admin/ or set x-api-key header"
+				if strings.Contains(r.URL.Path, "/messages") {
+					writeAnthropicError(w, http.StatusUnauthorized, "authentication_error", message)
+				} else {
+					writeOpenAIError(w, http.StatusUnauthorized, "authentication_error", message)
+				}
 				return
 			}
 			next(w, r)
@@ -308,9 +308,9 @@ func startProxy(host string, port int) error {
 				ownedBy = "opencode"
 			}
 			list[i] = map[string]any{
-				"id":      m.ID,
-				"object":  "model",
-				"created": time.Now().UnixMilli(),
+				"id":       m.ID,
+				"object":   "model",
+				"created":  time.Now().Unix(),
 				"owned_by": ownedBy,
 			}
 		}
@@ -321,32 +321,19 @@ func startProxy(host string, port int) error {
 
 	chatHandler := apiKeyHandler(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
-			return
-		}
-		if activeCount == 0 && len(loadPool().Accounts) == 0 {
-			writeJSON(w, http.StatusUnauthorized, map[string]any{
-				"error": map[string]string{
-					"message": "No accounts in pool. Run with --add-account or POST /admin/login to add accounts.",
-					"type":    "auth_error",
-				},
-			})
+			writeOpenAIError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
 			return
 		}
 
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{
-				"error": map[string]string{"message": err.Error(), "type": "parse_error"},
-			})
+			writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 			return
 		}
 
 		var params map[string]any
 		if err := json.Unmarshal(body, &params); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{
-				"error": map[string]string{"message": err.Error(), "type": "parse_error"},
-			})
+			writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 			return
 		}
 
@@ -386,9 +373,7 @@ func startProxy(host string, port int) error {
 		case "reject":
 			msg := fmt.Sprintf("model %q is a paid opencode model; only free models are proxied", model)
 			finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, msg)
-			writeJSON(w, http.StatusBadRequest, map[string]any{
-				"error": map[string]string{"message": msg, "type": "invalid_request_error"},
-			})
+			writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", msg)
 			return
 		case "zen":
 			reqLog.Upstream = upstreamOpenCode
@@ -401,9 +386,7 @@ func startProxy(host string, port int) error {
 			if err != nil {
 				log.Printf("  api error: %v", err)
 				finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
-				writeJSON(w, http.StatusBadGateway, map[string]any{
-					"error": map[string]string{"message": err.Error(), "type": "api_error"},
-				})
+				writeOpenAIError(w, http.StatusBadGateway, "api_error", err.Error())
 				return
 			}
 			defer resp.Body.Close()
@@ -416,12 +399,7 @@ func startProxy(host string, port int) error {
 		}
 
 		if activeCount == 0 && len(loadPool().Accounts) == 0 {
-			writeJSON(w, http.StatusUnauthorized, map[string]any{
-				"error": map[string]string{
-					"message": "No accounts in pool. Run with --add-account or POST /admin/login to add accounts.",
-					"type":    "auth_error",
-				},
-			})
+			writeOpenAIError(w, http.StatusUnauthorized, "authentication_error", "No accounts in pool. Run with --add-account or POST /admin/login to add accounts.")
 			return
 		}
 
@@ -429,9 +407,7 @@ func startProxy(host string, port int) error {
 		if err != nil {
 			log.Printf("  api error: %v", err)
 			finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
-			writeJSON(w, http.StatusInternalServerError, map[string]any{
-				"error": map[string]string{"message": err.Error(), "type": "api_error"},
-			})
+			writeOpenAIError(w, http.StatusBadGateway, "api_error", err.Error())
 			return
 		}
 		reqLog.Upstream = upstreamCline
@@ -453,18 +429,27 @@ func startProxy(host string, port int) error {
 	// Anthropic Messages API support
 	anthropicHandler := apiKeyHandler(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			writeAnthropicError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
 			return
 		}
 		handleAnthropicMessages(w, r)
 	})
 	mux.HandleFunc("/v1/messages", anthropicHandler)
 	mux.HandleFunc("/messages", anthropicHandler)
+	countTokensHandler := apiKeyHandler(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			writeAnthropicError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
+			return
+		}
+		handleAnthropicCountTokens(w, r)
+	})
+	mux.HandleFunc("/v1/messages/count_tokens", countTokensHandler)
+	mux.HandleFunc("/messages/count_tokens", countTokensHandler)
 
 	// OpenAI Responses API support（所有上游：zen 免费模型 + Cline 账号池）
 	responsesHandler := apiKeyHandler(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			writeOpenAIError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
 			return
 		}
 		handleResponses(w, r)
@@ -1143,9 +1128,7 @@ func handleNonStreamResponse(w http.ResponseWriter, upstream *http.Response, acc
 	var raw map[string]any
 	if err := json.NewDecoder(upstream.Body).Decode(&raw); err != nil {
 		finalizeRequestLog(reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, "decode response: "+err.Error())
-		writeJSON(w, http.StatusInternalServerError, map[string]any{
-			"error": map[string]string{"message": err.Error(), "type": "parse_error"},
-		})
+		writeOpenAIError(w, http.StatusBadGateway, "api_error", "decode response: "+err.Error())
 		return
 	}
 
@@ -1180,33 +1163,35 @@ type anthropicMsg struct {
 }
 
 type toolAccumulator struct {
-	index   int
-	id      string
-	name    string
-	args    string
-	emitted bool
+	id   string
+	name string
+	args string
 }
 
 type anthropicReq struct {
-	Model       string          `json:"model"`
-	MaxTokens   int             `json:"max_tokens"`
-	Messages    []anthropicMsg  `json:"messages"`
-	System      json.RawMessage `json:"system,omitempty"`
-	Stream      bool            `json:"stream,omitempty"`
-	Temperature float64         `json:"temperature,omitempty"`
-	TopP        float64         `json:"top_p,omitempty"`
-	TopK        int             `json:"top_k,omitempty"`
-	Stop        json.RawMessage `json:"stop_sequences,omitempty"`
-	Tools       json.RawMessage `json:"tools,omitempty"`
-	ToolChoice  json.RawMessage `json:"tool_choice,omitempty"`
-	Metadata    json.RawMessage `json:"metadata,omitempty"`
-	Extra       map[string]any  `json:"-"`
+	Model        string          `json:"model"`
+	MaxTokens    *int            `json:"max_tokens"`
+	Messages     []anthropicMsg  `json:"messages"`
+	System       json.RawMessage `json:"system,omitempty"`
+	Stream       bool            `json:"stream,omitempty"`
+	Temperature  *float64        `json:"temperature,omitempty"`
+	TopP         *float64        `json:"top_p,omitempty"`
+	TopK         *int            `json:"top_k,omitempty"`
+	Stop         json.RawMessage `json:"stop_sequences,omitempty"`
+	Tools        json.RawMessage `json:"tools,omitempty"`
+	ToolChoice   json.RawMessage `json:"tool_choice,omitempty"`
+	Metadata     json.RawMessage `json:"metadata,omitempty"`
+	OutputConfig json.RawMessage `json:"output_config,omitempty"`
+	Thinking     json.RawMessage `json:"thinking,omitempty"`
+	Extra        map[string]any  `json:"-"`
 }
 
 func loadOverrideContent() string {
-	data, err := os.ReadFile("override.md")
+	data, err := os.ReadFile(resolveDataPath("override.md"))
 	if err != nil {
-		log.Printf("  override.md not found: %v", err)
+		if !os.IsNotExist(err) {
+			log.Printf("  override.md read failed: %v", err)
+		}
 		return ""
 	}
 	content := strings.TrimSpace(string(data))
@@ -1253,13 +1238,17 @@ func anthropicToolsToOpenAI(tools []any) []any {
 				continue
 			}
 			// Convert Anthropic format to OpenAI
+			function := map[string]any{
+				"name":        tMap["name"],
+				"description": tMap["description"],
+				"parameters":  tMap["input_schema"],
+			}
+			if strict, ok := tMap["strict"].(bool); ok {
+				function["strict"] = strict
+			}
 			oai := map[string]any{
-				"type": "function",
-				"function": map[string]any{
-					"name":        tMap["name"],
-					"description": tMap["description"],
-					"parameters":  tMap["input_schema"],
-				},
+				"type":     "function",
+				"function": function,
 			}
 			out = append(out, oai)
 		}
@@ -1267,101 +1256,305 @@ func anthropicToolsToOpenAI(tools []any) []any {
 	return out
 }
 
+func anthropicToolChoiceToOpenAI(raw json.RawMessage) (any, *bool) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var choice map[string]any
+	if err := json.Unmarshal(raw, &choice); err != nil {
+		return nil, nil
+	}
+	var mapped any
+	switch choice["type"] {
+	case "auto":
+		mapped = "auto"
+	case "any":
+		mapped = "required"
+	case "none":
+		mapped = "none"
+	case "tool":
+		if name, _ := choice["name"].(string); name != "" {
+			mapped = map[string]any{
+				"type":     "function",
+				"function": map[string]any{"name": name},
+			}
+		}
+	}
+	var parallel *bool
+	if disabled, ok := choice["disable_parallel_tool_use"].(bool); ok {
+		enabled := !disabled
+		parallel = &enabled
+	}
+	return mapped, parallel
+}
+
+func anthropicOutputConfigToOpenAI(raw json.RawMessage) (string, map[string]any) {
+	if len(raw) == 0 {
+		return "", nil
+	}
+	var config map[string]any
+	if err := json.Unmarshal(raw, &config); err != nil {
+		return "", nil
+	}
+	effort, _ := config["effort"].(string)
+	format, _ := config["format"].(map[string]any)
+	if format == nil {
+		return effort, nil
+	}
+	switch format["type"] {
+	case "json_schema":
+		return effort, map[string]any{
+			"type": "json_schema",
+			"json_schema": map[string]any{
+				"name":   "anthropic_output",
+				"schema": format["schema"],
+				"strict": true,
+			},
+		}
+	case "json_object":
+		return effort, map[string]any{"type": "json_object"}
+	}
+	return effort, nil
+}
+
+func validateAnthropicCompatibility(req anthropicReq) error {
+	if req.Model == "" {
+		return fmt.Errorf("model is required")
+	}
+	if req.MaxTokens != nil && *req.MaxTokens < 0 {
+		return fmt.Errorf("max_tokens must be greater than or equal to 0")
+	}
+	if len(req.Tools) > 0 {
+		var tools []any
+		if err := json.Unmarshal(req.Tools, &tools); err != nil {
+			return fmt.Errorf("invalid tools: %w", err)
+		}
+		for _, tool := range tools {
+			toolMap, _ := tool.(map[string]any)
+			if toolMap == nil {
+				return fmt.Errorf("invalid tool definition")
+			}
+			if toolMap["name"] == nil || toolMap["input_schema"] == nil {
+				return fmt.Errorf("only Anthropic client tools with name and input_schema can be mapped to the upstream chat API")
+			}
+		}
+	}
+	return nil
+}
+
+func anthropicImageToOpenAI(block map[string]any) (map[string]any, bool) {
+	source, _ := block["source"].(map[string]any)
+	if source == nil {
+		return nil, false
+	}
+	var imageURL string
+	switch source["type"] {
+	case "base64":
+		mediaType, _ := source["media_type"].(string)
+		data, _ := source["data"].(string)
+		if mediaType != "" && data != "" {
+			imageURL = "data:" + mediaType + ";base64," + data
+		}
+	case "url":
+		imageURL, _ = source["url"].(string)
+	}
+	if imageURL == "" {
+		return nil, false
+	}
+	return map[string]any{
+		"type":      "image_url",
+		"image_url": map[string]any{"url": imageURL},
+	}, true
+}
+
+func anthropicToolResultContent(content any) string {
+	switch value := content.(type) {
+	case string:
+		return value
+	case []any:
+		parts := make([]string, 0, len(value))
+		allText := true
+		for _, item := range value {
+			block, _ := item.(map[string]any)
+			if block["type"] != "text" {
+				allText = false
+			}
+			if text, _ := block["text"].(string); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		if allText && len(parts) > 0 {
+			return strings.Join(parts, "\n")
+		}
+	}
+	encoded, err := json.Marshal(content)
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
+}
+
+func anthropicContentToOpenAI(blocks []any) (any, []any, []any, string) {
+	contentParts := []any{}
+	toolCalls := []any{}
+	toolResults := []any{}
+	reasoningParts := []string{}
+	allText := true
+	textParts := []string{}
+
+	for _, item := range blocks {
+		block, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch block["type"] {
+		case "text":
+			if text, _ := block["text"].(string); text != "" {
+				textParts = append(textParts, text)
+				contentParts = append(contentParts, map[string]any{"type": "text", "text": text})
+			}
+		case "image":
+			if image, ok := anthropicImageToOpenAI(block); ok {
+				allText = false
+				contentParts = append(contentParts, image)
+			}
+		case "document":
+			source, _ := block["source"].(map[string]any)
+			if source != nil && source["type"] == "text" {
+				if data, _ := source["data"].(string); data != "" {
+					textParts = append(textParts, data)
+					contentParts = append(contentParts, map[string]any{"type": "text", "text": data})
+				}
+			}
+		case "tool_use":
+			arguments := "{}"
+			if input := block["input"]; input != nil {
+				if value, ok := input.(string); ok {
+					arguments = value
+				} else if encoded, err := json.Marshal(input); err == nil {
+					arguments = string(encoded)
+				}
+			}
+			toolCalls = append(toolCalls, map[string]any{
+				"id":   block["id"],
+				"type": "function",
+				"function": map[string]any{
+					"name":      block["name"],
+					"arguments": arguments,
+				},
+			})
+		case "tool_result":
+			result := anthropicToolResultContent(block["content"])
+			if isError, _ := block["is_error"].(bool); isError {
+				result = "[tool_error] " + result
+			}
+			toolResults = append(toolResults, map[string]any{
+				"role":         "tool",
+				"content":      result,
+				"tool_call_id": block["tool_use_id"],
+			})
+		case "thinking":
+			if thinking, _ := block["thinking"].(string); thinking != "" {
+				reasoningParts = append(reasoningParts, thinking)
+			}
+		}
+	}
+
+	if len(contentParts) == 0 {
+		return "", toolCalls, toolResults, strings.Join(reasoningParts, "\n")
+	}
+	if allText {
+		return strings.Join(textParts, "\n"), toolCalls, toolResults, strings.Join(reasoningParts, "\n")
+	}
+	return contentParts, toolCalls, toolResults, strings.Join(reasoningParts, "\n")
+}
+
 func anthropicToOpenAI(req anthropicReq) map[string]any {
+	maxTokens := defaultMaxTokens
+	if req.MaxTokens != nil {
+		maxTokens = *req.MaxTokens
+	}
 	openAI := map[string]any{
 		"model":      req.Model,
-		"max_tokens": req.MaxTokens,
+		"max_tokens": maxTokens,
 		"stream":     req.Stream,
 		"messages":   []any{},
 	}
-	if req.Temperature != 0 {
-		openAI["temperature"] = req.Temperature
+	if req.Temperature != nil {
+		openAI["temperature"] = *req.Temperature
 	}
-	if req.TopP != 0 {
-		openAI["top_p"] = req.TopP
+	if req.TopP != nil {
+		openAI["top_p"] = *req.TopP
 	}
-	// Convert Anthropic tools to OpenAI format
-	if req.Tools != nil {
-		var toolsArr []any
-		if err := json.Unmarshal(req.Tools, &toolsArr); err == nil {
-			openAI["tools"] = anthropicToolsToOpenAI(toolsArr)
+	if req.TopK != nil {
+		openAI["top_k"] = *req.TopK
+	}
+	if len(req.Stop) > 0 {
+		var stop any
+		if json.Unmarshal(req.Stop, &stop) == nil {
+			openAI["stop"] = stop
 		}
 	}
-	if req.ToolChoice != nil {
-		openAI["tool_choice"] = req.ToolChoice
+	if len(req.Tools) > 0 {
+		var tools []any
+		if json.Unmarshal(req.Tools, &tools) == nil {
+			openAI["tools"] = anthropicToolsToOpenAI(tools)
+		}
+	}
+	if toolChoice, parallel := anthropicToolChoiceToOpenAI(req.ToolChoice); toolChoice != nil {
+		openAI["tool_choice"] = toolChoice
+		if parallel != nil {
+			openAI["parallel_tool_calls"] = *parallel
+		}
+	}
+	if effort, format := anthropicOutputConfigToOpenAI(req.OutputConfig); effort != "" || format != nil {
+		if effort != "" {
+			openAI["reasoning_effort"] = effort
+		}
+		if format != nil {
+			openAI["response_format"] = format
+		}
+	} else if len(req.Thinking) > 0 {
+		openAI["reasoning_effort"] = "high"
+	}
+	if len(req.Metadata) > 0 {
+		var metadata map[string]any
+		if json.Unmarshal(req.Metadata, &metadata) == nil {
+			if userID, _ := metadata["user_id"].(string); userID != "" {
+				openAI["user"] = userID
+			}
+		}
 	}
 
 	msgs := []any{}
-
-	// System prompt: use override.md if it exists, otherwise use Anthropic's system field
-	sysContent := loadOverrideContent()
-	if sysContent == "" && req.System != nil {
-		sysContent = extractStringContent(req.System)
+	systemContent := loadOverrideContent()
+	if systemContent == "" && len(req.System) > 0 {
+		systemContent = extractStringContent(req.System)
 	}
-	if sysContent != "" {
-		log.Printf("  system prompt: %d bytes (from override.md)", len(sysContent))
-		msgs = append(msgs, map[string]any{"role": "system", "content": sysContent})
+	if systemContent != "" {
+		msgs = append(msgs, map[string]any{"role": "system", "content": systemContent})
 	}
 
-	for _, m := range req.Messages {
-		switch c := m.Content.(type) {
+	for _, message := range req.Messages {
+		switch content := message.Content.(type) {
 		case string:
-			msgs = append(msgs, map[string]any{"role": m.Role, "content": c})
+			msgs = append(msgs, map[string]any{"role": message.Role, "content": content})
 		case []any:
-			textParts := []string{}
-			var toolCalls []any
-			var toolResult *map[string]any
-
-			for _, block := range c {
-				if b, ok := block.(map[string]any); ok {
-					switch b["type"] {
-					case "text":
-						if t, ok := b["text"].(string); ok {
-							textParts = append(textParts, t)
-						}
-					case "image":
-						// skip images
-					case "tool_use":
-						argsStr := "{}"
-						if input, ok := b["input"]; ok && input != nil {
-							if s, ok := input.(string); ok {
-								argsStr = s
-							} else if bts, err := json.Marshal(input); err == nil {
-								argsStr = string(bts)
-							}
-						}
-						tc := map[string]any{
-							"id":   b["id"],
-							"type": "function",
-							"function": map[string]any{
-								"name":      b["name"],
-								"arguments": argsStr,
-							},
-						}
-						toolCalls = append(toolCalls, tc)
-					case "tool_result":
-						tr := map[string]any{
-							"role":         "tool",
-							"content":      b["content"],
-							"tool_call_id": b["tool_use_id"],
-						}
-						toolResult = &tr
-					}
+			convertedContent, toolCalls, toolResults, reasoningContent := anthropicContentToOpenAI(content)
+			if message.Role == "assistant" {
+				converted := map[string]any{"role": "assistant", "content": convertedContent}
+				if reasoningContent != "" {
+					converted["reasoning_content"] = reasoningContent
 				}
+				if len(toolCalls) > 0 {
+					converted["tool_calls"] = toolCalls
+				}
+				msgs = append(msgs, converted)
+				continue
 			}
-
-			if m.Role == "assistant" && len(toolCalls) > 0 {
-				msg := map[string]any{
-					"role":       "assistant",
-					"content":    strings.Join(textParts, "\n"),
-					"tool_calls": toolCalls,
-				}
-				msgs = append(msgs, msg)
-			} else if m.Role == "user" && toolResult != nil {
-				msgs = append(msgs, *toolResult)
-			} else {
-				content := strings.Join(textParts, "\n")
-				msgs = append(msgs, map[string]any{"role": m.Role, "content": content})
+			msgs = append(msgs, toolResults...)
+			if text, ok := convertedContent.(string); !ok || text != "" {
+				msgs = append(msgs, map[string]any{"role": message.Role, "content": convertedContent})
 			}
 		}
 	}
@@ -1370,23 +1563,70 @@ func anthropicToOpenAI(req anthropicReq) map[string]any {
 	return openAI
 }
 
+func anthropicUsageFromOpenAI(openAI map[string]any) map[string]any {
+	inputTokens := any(0)
+	outputTokens := any(0)
+	cacheReadTokens := any(0)
+	cacheCreationTokens := any(0)
+	usage, _ := openAI["usage"].(map[string]any)
+	if usage != nil {
+		if value := usage["prompt_tokens"]; value != nil {
+			inputTokens = value
+		} else if value := usage["input_tokens"]; value != nil {
+			inputTokens = value
+		}
+		if value := usage["completion_tokens"]; value != nil {
+			outputTokens = value
+		} else if value := usage["output_tokens"]; value != nil {
+			outputTokens = value
+		}
+		if value := usage["cache_read_input_tokens"]; value != nil {
+			cacheReadTokens = value
+		}
+		if value := usage["cache_creation_input_tokens"]; value != nil {
+			cacheCreationTokens = value
+		}
+		if details, _ := usage["prompt_tokens_details"].(map[string]any); details != nil {
+			if value := details["cached_tokens"]; value != nil {
+				cacheReadTokens = value
+			}
+			if value := details["cache_write_tokens"]; value != nil {
+				cacheCreationTokens = value
+			}
+		}
+	}
+	return map[string]any{
+		"input_tokens":                inputTokens,
+		"cache_creation_input_tokens": cacheCreationTokens,
+		"cache_read_input_tokens":     cacheReadTokens,
+		"output_tokens":               outputTokens,
+	}
+}
+
 func openAIToAnthropic(openAI map[string]any) map[string]any {
 	out := map[string]any{
-		"id":    "msg_" + fmt.Sprintf("%x", time.Now().UnixMilli()),
-		"type":  "message",
-		"role":  "assistant",
-		"model": getNested(openAI, "model"),
+		"id":            newResponseID("msg_"),
+		"type":          "message",
+		"role":          "assistant",
+		"model":         getNested(openAI, "model"),
+		"stop_sequence": nil,
 	}
 
-	choices := getNested(openAI, "choices")
-	if choices == nil {
+	choices, _ := getNested(openAI, "choices").([]any)
+	if len(choices) == 0 {
 		out["content"] = []any{map[string]any{"type": "text", "text": ""}}
 		out["stop_reason"] = "end_turn"
-		out["usage"] = map[string]any{"input_tokens": 0, "output_tokens": 0}
+		out["usage"] = anthropicUsageFromOpenAI(openAI)
 		return out
 	}
 
-	choice0 := getNested(openAI, "choices", 0).(map[string]any)
+	choice0, _ := choices[0].(map[string]any)
+	if choice0 == nil {
+		out["content"] = []any{map[string]any{"type": "text", "text": ""}}
+		out["stop_reason"] = "end_turn"
+		out["usage"] = anthropicUsageFromOpenAI(openAI)
+		return out
+	}
 	msg, _ := choice0["message"].(map[string]any)
 	if msg == nil {
 		msg, _ = choice0["delta"].(map[string]any)
@@ -1399,18 +1639,20 @@ func openAIToAnthropic(openAI map[string]any) map[string]any {
 		}
 	}
 
-	contentBlocks := []any{map[string]any{"type": "text", "text": text}}
+	contentBlocks := []any{}
+	if text != "" {
+		contentBlocks = append(contentBlocks, map[string]any{"type": "text", "text": text})
+	}
 
 	// Convert tool_calls to Anthropic tool_use blocks
 	if msg != nil {
 		if tc, ok := msg["tool_calls"].([]any); ok && len(tc) > 0 {
-			contentBlocks = []any{} // Clear text-only, proper response has both
-			if text != "" {
-				contentBlocks = append(contentBlocks, map[string]any{"type": "text", "text": text})
-			}
 			for _, tcItem := range tc {
 				if tcMap, ok := tcItem.(map[string]any); ok {
 					funcData, _ := tcMap["function"].(map[string]any)
+					if funcData == nil {
+						continue
+					}
 					input := funcData["arguments"]
 					// OpenAI arguments is a JSON string; Anthropic expects an object
 					if argsStr, ok := input.(string); ok {
@@ -1430,6 +1672,9 @@ func openAIToAnthropic(openAI map[string]any) map[string]any {
 			}
 		}
 	}
+	if len(contentBlocks) == 0 {
+		contentBlocks = append(contentBlocks, map[string]any{"type": "text", "text": ""})
+	}
 
 	out["content"] = contentBlocks
 
@@ -1440,18 +1685,12 @@ func openAIToAnthropic(openAI map[string]any) map[string]any {
 		out["stop_reason"] = "max_tokens"
 	case "tool_calls":
 		out["stop_reason"] = "tool_use"
+	case "content_filter":
+		out["stop_reason"] = "refusal"
 	default:
 		out["stop_reason"] = "end_turn"
 	}
-
-	usage := map[string]any{}
-	if u := getNested(openAI, "usage"); u != nil {
-		if um, ok := u.(map[string]any); ok {
-			usage["input_tokens"] = um["prompt_tokens"]
-			usage["output_tokens"] = um["completion_tokens"]
-		}
-	}
-	out["usage"] = usage
+	out["usage"] = anthropicUsageFromOpenAI(openAI)
 
 	return out
 }
@@ -1459,29 +1698,28 @@ func openAIToAnthropic(openAI map[string]any) map[string]any {
 func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"error": map[string]string{"message": err.Error(), "type": "parse_error"},
-		})
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
 
 	var req anthropicReq
 	if err := json.Unmarshal(body, &req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"error": map[string]string{"message": err.Error(), "type": "parse_error"},
-		})
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+	if err := validateAnthropicCompatibility(req); err != nil {
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
 
 	if len(req.Messages) == 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"error": map[string]string{"message": "messages is required", "type": "parse_error"},
-		})
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "messages is required")
 		return
 	}
 
-	if req.MaxTokens == 0 {
-		req.MaxTokens = defaultMaxTokens
+	if req.MaxTokens == nil {
+		maxTokens := defaultMaxTokens
+		req.MaxTokens = &maxTokens
 	}
 
 	openAIReq := anthropicToOpenAI(req)
@@ -1495,9 +1733,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	case "reject":
 		msg := fmt.Sprintf("model %q is a paid opencode model; only free models are proxied", req.Model)
 		finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, msg)
-		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"error": map[string]string{"message": msg, "type": "invalid_request_error"},
-		})
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", msg)
 		return
 	case "zen":
 		reqLog.Upstream = upstreamOpenCode
@@ -1510,9 +1746,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			log.Printf("  anthropic api error: %v", err)
 			finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
-			writeJSON(w, http.StatusBadGateway, map[string]any{
-				"error": map[string]string{"message": err.Error(), "type": "api_error"},
-			})
+			writeAnthropicError(w, http.StatusBadGateway, "api_error", err.Error())
 			return
 		}
 		defer resp.Body.Close()
@@ -1522,19 +1756,13 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 			var raw map[string]any
 			if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 				finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, "decode response: "+err.Error())
-				writeJSON(w, http.StatusInternalServerError, map[string]any{
-					"error": map[string]string{"message": err.Error(), "type": "parse_error"},
-				})
+				writeAnthropicError(w, http.StatusBadGateway, "api_error", "decode response: "+err.Error())
 				return
 			}
 			out2 := normalizeOpenAIResponse(unwrapDataEnvelope(raw))
 			usage := parseTokenUsage(out2["usage"])
 			finalizeRequestLog(&reqLog, usage, time.Time{}, reqLog.StartedAt, true, "")
 			anthropicResp := openAIToAnthropic(out2)
-			if tc, ok := getNested(out2, "choices", 0, "message", "tool_calls").([]any); ok && len(tc) > 0 {
-				anthropicResp["content"] = []any{}
-				anthropicResp["stop_reason"] = "tool_use"
-			}
 			writeJSON(w, http.StatusOK, anthropicResp)
 		}
 		return
@@ -1549,12 +1777,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if activeCount == 0 && len(p.Accounts) == 0 {
-		writeJSON(w, http.StatusUnauthorized, map[string]any{
-			"error": map[string]string{
-				"message": "No accounts in pool",
-				"type":    "auth_error",
-			},
-		})
+		writeAnthropicError(w, http.StatusUnauthorized, "authentication_error", "No accounts in pool")
 		return
 	}
 
@@ -1562,9 +1785,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Printf("  anthropic api error: %v", err)
 		finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
-		writeJSON(w, http.StatusInternalServerError, map[string]any{
-			"error": map[string]string{"message": err.Error(), "type": "api_error"},
-		})
+		writeAnthropicError(w, http.StatusBadGateway, "api_error", err.Error())
 		return
 	}
 	reqLog.Upstream = upstreamCline
@@ -1580,9 +1801,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		var raw map[string]any
 		if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 			finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, "decode response: "+err.Error())
-			writeJSON(w, http.StatusInternalServerError, map[string]any{
-				"error": map[string]string{"message": err.Error(), "type": "parse_error"},
-			})
+			writeAnthropicError(w, http.StatusBadGateway, "api_error", "decode response: "+err.Error())
 			return
 		}
 		out := raw
@@ -1596,14 +1815,34 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		recordTokenUsage(acc, reqLog.Model, usage)
 		finalizeRequestLog(&reqLog, usage, time.Time{}, reqLog.StartedAt, true, "")
 		anthropicResp := openAIToAnthropic(out)
-
-		if tc, ok := getNested(out, "choices", 0, "message", "tool_calls").([]any); ok && len(tc) > 0 {
-			anthropicResp["content"] = []any{}
-			anthropicResp["stop_reason"] = "tool_use"
-		}
-
 		writeJSON(w, http.StatusOK, anthropicResp)
 	}
+}
+
+func handleAnthropicCountTokens(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+	var req anthropicReq
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+	if err := validateAnthropicCompatibility(req); err != nil {
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+	if len(req.Messages) == 0 {
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "messages is required")
+		return
+	}
+	inputTokens := estimateJSON(anthropicToOpenAI(req))
+	if inputTokens < 1 {
+		inputTokens = 1
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"input_tokens": inputTokens})
 }
 
 func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *Account, reqLog *RequestLog) {
@@ -1630,40 +1869,54 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 	emit("message_start", map[string]any{
 		"type": "message_start",
 		"message": map[string]any{
-			"id":          msgID,
-			"type":        "message",
-			"role":        "assistant",
-			"content":     []any{},
-			"model":       "",
-			"stop_reason": nil,
+			"id":            msgID,
+			"type":          "message",
+			"role":          "assistant",
+			"content":       []any{},
+			"model":         reqLog.Model,
+			"stop_reason":   nil,
+			"stop_sequence": nil,
+			"usage": map[string]any{
+				"input_tokens":                0,
+				"cache_creation_input_tokens": 0,
+				"cache_read_input_tokens":     0,
+				"output_tokens":               0,
+			},
 		},
 	})
 
-	textIndex := new(int)
-	*textIndex = -1
+	nextContentIndex := 0
+	textIndex := -1
 	hasText := false
 	pendingTools := map[int]*toolAccumulator{}
+	toolOrder := []int{}
 
-	emitToolBlock := func(acc *toolAccumulator) {
-		acc.emitted = true
-		var argsObj any
-		json.Unmarshal([]byte(acc.args), &argsObj)
-		if argsObj == nil {
-			argsObj = map[string]any{}
+	emitToolBlock := func(acc *toolAccumulator, index int) {
+		args := strings.TrimSpace(acc.args)
+		if args == "" {
+			args = "{}"
 		}
 		emit("content_block_start", map[string]any{
 			"type":  "content_block_start",
-			"index": acc.index,
+			"index": index,
 			"content_block": map[string]any{
 				"type":  "tool_use",
 				"id":    acc.id,
 				"name":  acc.name,
-				"input": argsObj,
+				"input": map[string]any{},
+			},
+		})
+		emit("content_block_delta", map[string]any{
+			"type":  "content_block_delta",
+			"index": index,
+			"delta": map[string]any{
+				"type":         "input_json_delta",
+				"partial_json": args,
 			},
 		})
 		emit("content_block_stop", map[string]any{
 			"type":  "content_block_stop",
-			"index": acc.index,
+			"index": index,
 		})
 	}
 
@@ -1727,10 +1980,11 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 		if c, ok := delta["content"].(string); ok && c != "" {
 			if !hasText {
 				hasText = true
-				*textIndex++
+				textIndex = nextContentIndex
+				nextContentIndex++
 				emit("content_block_start", map[string]any{
 					"type":  "content_block_start",
-					"index": *textIndex,
+					"index": textIndex,
 					"content_block": map[string]any{
 						"type": "text",
 						"text": "",
@@ -1739,7 +1993,7 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 			}
 			emit("content_block_delta", map[string]any{
 				"type":  "content_block_delta",
-				"index": *textIndex,
+				"index": textIndex,
 				"delta": map[string]any{
 					"type": "text_delta",
 					"text": sanitizeContent(c),
@@ -1760,8 +2014,9 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 				}
 				acc, exists := pendingTools[idx]
 				if !exists {
-					acc = &toolAccumulator{index: idx}
+					acc = &toolAccumulator{}
 					pendingTools[idx] = acc
+					toolOrder = append(toolOrder, idx)
 				}
 				if id, ok := tcMap["id"].(string); ok && id != "" {
 					acc.id = id
@@ -1773,9 +2028,6 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 					if args, ok := fn["arguments"].(string); ok && args != "" {
 						acc.args += args
 					}
-				}
-				if acc.id != "" && acc.name != "" && acc.args != "" && !acc.emitted {
-					emitToolBlock(acc)
 				}
 			}
 		}
@@ -1795,15 +2047,22 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 	if hasText {
 		emit("content_block_stop", map[string]any{
 			"type":  "content_block_stop",
-			"index": *textIndex,
+			"index": textIndex,
 		})
 	}
 
-	// Emit any remaining un-emitted tool blocks
-	for _, acc := range pendingTools {
-		if !acc.emitted {
-			emitToolBlock(acc)
+	// OpenAI streams function arguments in arbitrary JSON fragments. Emit the
+	// accumulated value using Anthropic's input_json_delta event sequence.
+	for _, upstreamIndex := range toolOrder {
+		acc := pendingTools[upstreamIndex]
+		if acc.id == "" || acc.name == "" {
+			continue
 		}
+		emitToolBlock(acc, nextContentIndex)
+		nextContentIndex++
+	}
+	if len(toolOrder) > 0 {
+		stopReason = "tool_use"
 	}
 
 	emit("message_delta", map[string]any{

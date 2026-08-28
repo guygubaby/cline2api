@@ -6,8 +6,22 @@ services:
     ports:
       - "3457:3457"
     volumes:
-      - ./.cline-accounts.json:/app/.cline-accounts.json
-      - ./override.md:/app/override.md:ro
+      - type: bind
+        source: ./.cline-accounts.json
+        target: /app/.cline-accounts.json
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./.cline-request-logs.json
+        target: /app/.cline-request-logs.json
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./override.md
+        target: /app/override.md
+        read_only: true
+        bind:
+          create_host_path: false
     environment:
       - PORT=3457
       - CLINE_PROXY_HOST=0.0.0.0
