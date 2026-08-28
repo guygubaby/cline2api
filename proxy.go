@@ -403,7 +403,27 @@ func startProxy(host string, port int) error {
 			return
 		}
 
-		resp, acc, err := callClineAPI(params, isStream)
+		if !isStream {
+			out, acc, err := callClineNonStream(params)
+			if err != nil {
+				log.Printf("  api error: %v", err)
+				finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
+				writeOpenAIError(w, http.StatusBadGateway, "api_error", err.Error())
+				return
+			}
+			reqLog.Upstream = upstreamCline
+			if acc != nil {
+				reqLog.AccountID = acc.AccountID
+				reqLog.AccountEmail = acc.Email
+			}
+			usage := parseTokenUsage(out["usage"])
+			recordTokenUsage(acc, reqLog.Model, usage)
+			finalizeRequestLog(&reqLog, usage, time.Time{}, reqLog.StartedAt, true, "")
+			writeJSON(w, http.StatusOK, out)
+			return
+		}
+
+		resp, acc, err := callClineAPI(params, true)
 		if err != nil {
 			log.Printf("  api error: %v", err)
 			finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
@@ -417,11 +437,7 @@ func startProxy(host string, port int) error {
 			reqLog.AccountEmail = acc.Email
 		}
 
-		if isStream {
-			handleStreamResponse(w, resp, acc, &reqLog)
-		} else {
-			handleNonStreamResponse(w, resp, acc, &reqLog)
-		}
+		handleStreamResponse(w, resp, acc, &reqLog)
 	})
 	mux.HandleFunc("/v1/chat/completions", chatHandler)
 	mux.HandleFunc("/chat/completions", chatHandler)
@@ -584,7 +600,8 @@ func buildUpstreamBody(params map[string]any, stream bool) map[string]any {
 		}
 	}
 	_, explicitThinking := params["thinking"]
-	if strings.Contains(model, "deepseek-v4") && !stream && maxTokens <= smallAuxiliaryMaxTokens && !hasTools && !explicitReasoning && !explicitThinking {
+	clientStream, _ := params["stream"].(bool)
+	if strings.Contains(model, "deepseek-v4") && !clientStream && maxTokens <= smallAuxiliaryMaxTokens && !hasTools && !explicitReasoning && !explicitThinking {
 		body["thinking"] = map[string]any{"type": "disabled"}
 	}
 
@@ -1794,7 +1811,27 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, acc, err := callClineAPI(openAIReq, req.Stream)
+	if !req.Stream {
+		out, acc, err := callClineNonStream(openAIReq)
+		if err != nil {
+			log.Printf("  anthropic api error: %v", err)
+			finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
+			writeAnthropicError(w, http.StatusBadGateway, "api_error", err.Error())
+			return
+		}
+		reqLog.Upstream = upstreamCline
+		if acc != nil {
+			reqLog.AccountID = acc.AccountID
+			reqLog.AccountEmail = acc.Email
+		}
+		usage := parseTokenUsage(out["usage"])
+		recordTokenUsage(acc, reqLog.Model, usage)
+		finalizeRequestLog(&reqLog, usage, time.Time{}, reqLog.StartedAt, true, "")
+		writeJSON(w, http.StatusOK, openAIToAnthropic(out))
+		return
+	}
+
+	resp, acc, err := callClineAPI(openAIReq, true)
 	if err != nil {
 		log.Printf("  anthropic api error: %v", err)
 		finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
@@ -1808,28 +1845,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		reqLog.AccountEmail = acc.Email
 	}
 
-	if req.Stream {
-		handleAnthropicStream(w, resp, acc, &reqLog)
-	} else {
-		var raw map[string]any
-		if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
-			finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, "decode response: "+err.Error())
-			writeAnthropicError(w, http.StatusBadGateway, "api_error", "decode response: "+err.Error())
-			return
-		}
-		out := raw
-		if data, ok := raw["data"]; ok {
-			if d, ok := data.(map[string]any); ok {
-				out = d
-			}
-		}
-		out = normalizeOpenAIResponse(out)
-		usage := parseTokenUsage(out["usage"])
-		recordTokenUsage(acc, reqLog.Model, usage)
-		finalizeRequestLog(&reqLog, usage, time.Time{}, reqLog.StartedAt, true, "")
-		anthropicResp := openAIToAnthropic(out)
-		writeJSON(w, http.StatusOK, anthropicResp)
-	}
+	handleAnthropicStream(w, resp, acc, &reqLog)
 }
 
 func handleAnthropicCountTokens(w http.ResponseWriter, r *http.Request) {

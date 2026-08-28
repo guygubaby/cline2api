@@ -879,7 +879,28 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 
 	default: // cline
 		reqLog.Upstream = upstreamCline
-		upResp, acc, err := callClineAPI(chat, isStream)
+		if !isStream {
+			out, acc, err := callClineNonStream(chat)
+			if err != nil {
+				log.Printf("  responses api error: %v", err)
+				finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
+				writeOpenAIError(w, http.StatusBadGateway, "api_error", err.Error())
+				return
+			}
+			if acc != nil {
+				reqLog.AccountID = acc.AccountID
+				reqLog.AccountEmail = acc.Email
+			}
+			usage := parseTokenUsage(out["usage"])
+			if acc != nil {
+				recordTokenUsage(acc, reqLog.Model, usage)
+			}
+			finalizeRequestLog(&reqLog, usage, time.Time{}, reqLog.StartedAt, true, "")
+			writeJSON(w, http.StatusOK, chatToResponsesWithRequest(out, params))
+			return
+		}
+
+		upResp, acc, err := callClineAPI(chat, true)
 		if err != nil {
 			log.Printf("  responses api error: %v", err)
 			finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
@@ -892,28 +913,13 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 			reqLog.AccountEmail = acc.Email
 		}
 
-		if isStream {
-			w.Header().Set("Content-Type", "text/event-stream")
-			w.Header().Set("Cache-Control", "no-cache")
-			w.Header().Set("Connection", "keep-alive")
-			w.Header().Set("Access-Control-Allow-Origin", "*")
-			w.WriteHeader(http.StatusOK)
-			chatStreamToResponses(w, upResp, &reqLog, acc, params)
-			return
-		}
-		var raw map[string]any
-		if err := json.NewDecoder(upResp.Body).Decode(&raw); err != nil {
-			finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, "decode response: "+err.Error())
-			writeOpenAIError(w, http.StatusBadGateway, "api_error", "decode response: "+err.Error())
-			return
-		}
-		out2 := normalizeOpenAIResponse(unwrapDataEnvelope(raw))
-		usage := parseTokenUsage(out2["usage"])
-		if acc != nil {
-			recordTokenUsage(acc, reqLog.Model, usage)
-		}
-		finalizeRequestLog(&reqLog, usage, time.Time{}, reqLog.StartedAt, true, "")
-		writeJSON(w, http.StatusOK, chatToResponsesWithRequest(out2, params))
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.WriteHeader(http.StatusOK)
+		chatStreamToResponses(w, upResp, &reqLog, acc, params)
+		return
 	}
 }
 

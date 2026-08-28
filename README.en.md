@@ -101,6 +101,8 @@ Authentication accepts both OpenAI's `Authorization: Bearer <key>` and Anthropic
 
 > The upstream is a Chat Completions service, so features requiring vendor-side state or hosted execution cannot be faithfully emulated. OpenAI `background`, `previous_response_id`, `conversation`, and hosted tools, plus Anthropic server tools, containers, and Skills, return a standard error instead of being silently dropped. For stateless multi-turn Responses calls, send previous output items back in the next `input`.
 
+For client-side non-streaming DeepSeek requests, the Cline upstream is called with SSE and then aggregated back into the requested non-streaming protocol. Aggregation preserves visible text, parallel tool calls, reasoning fields, usage, and finish reason. A reasoning-only result retries at most once with another account and is never exposed as the final answer.
+
 ### 3. Account export/import (device migration)
 
 - **Export**: click "Export" on the Accounts page to download `cline-accounts-export.json`

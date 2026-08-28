@@ -102,6 +102,8 @@ Model:    cline-free/glm-5.2
 
 > 上游实际是 Chat Completions，因此无法可靠模拟需要厂商服务端状态或托管执行环境的功能。OpenAI 的 `background`、`previous_response_id`、`conversation`、托管工具，以及 Anthropic 的服务端工具、容器/Skill 等请求会返回标准错误，不会静默丢弃。Responses 可通过在下一次 `input` 中回传之前的 output items 实现无状态多轮调用。
 
+DeepSeek 的客户端非流式请求会在 Cline 上游使用 SSE，再聚合为客户端所需的非流式格式。聚合保留正文、并行工具调用、推理字段、usage 与结束原因；若只有推理而没有正文或工具调用，最多换一个账号重试一次，不会把隐藏推理冒充最终答案。
+
 ### 3. 账号导出/导入（跨设备迁移）
 
 - **导出**：账号管理页面点击「导出」按钮，下载 `cline-accounts-export.json`

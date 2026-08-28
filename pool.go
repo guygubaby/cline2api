@@ -212,6 +212,30 @@ func pickAccountForModel(model string) *Account {
 	return acc
 }
 
+// pickAlternativeAccountForModel returns one active account other than the
+// account that produced an empty response. It is used only for one bounded
+// retry and does not change the configured pool strategy or cooldown state.
+func pickAlternativeAccountForModel(model string, excluded *Account) *Account {
+	p := loadPool()
+	poolMu.Lock()
+	defer poolMu.Unlock()
+
+	now := time.Now()
+	for _, account := range p.Accounts {
+		if account == nil || account.Status != "active" || account == excluded {
+			continue
+		}
+		if excluded != nil && account.AccountID != "" && account.AccountID == excluded.AccountID {
+			continue
+		}
+		if until, cooling := account.ModelCooldowns[model]; cooling && now.Before(until) {
+			continue
+		}
+		return account
+	}
+	return nil
+}
+
 // pickAccountLocked 在已持有 poolMu 的前提下执行普通轮询挑选（供 pickAccountForModel 回退用）。
 func pickAccountLocked(p *AccountPool) *Account {
 	active := make([]*Account, 0)
