@@ -4,7 +4,7 @@ services:
     container_name: cline-proxy
     restart: unless-stopped
     ports:
-      - "3457:3457"
+      - "4000:3457"
     volumes:
       - type: bind
         source: ./.cline-accounts.json
@@ -23,5 +23,5 @@ services:
         bind:
           create_host_path: false
     environment:
-      - PORT=3457
+      - PORT=4000
       - CLINE_PROXY_HOST=0.0.0.0

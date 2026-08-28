@@ -1,11 +1,17 @@
-FROM golang:1.26-alpine AS builder
+FROM docker.1ms.run/golang:1.26-alpine AS builder
 
 WORKDIR /build
-COPY go.mod ./
-RUN go mod download 2>/dev/null || true
+
+ENV GOPROXY=https://goproxy.cn,direct
+
+COPY go.mod go.sum ./
+RUN go mod download
+
 COPY . .
 ARG APP_VERSION=dev
-RUN CGO_ENABLED=0 go build -ldflags="-s -w -X main.appVersion=${APP_VERSION}" -o cline-proxy .
+RUN CGO_ENABLED=0 go build \
+    -ldflags="-s -w -X main.appVersion=${APP_VERSION}" \
+    -o cline-proxy .
 
 FROM alpine:3.21
 
