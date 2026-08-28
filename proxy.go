@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -1688,8 +1689,9 @@ func anthropicUsageFromOpenAI(openAI map[string]any) map[string]any {
 }
 
 func openAIToAnthropic(openAI map[string]any) map[string]any {
+	messageID := newResponseID("msg_")
 	out := map[string]any{
-		"id":            newResponseID("msg_"),
+		"id":            messageID,
 		"type":          "message",
 		"role":          "assistant",
 		"model":         getNested(openAI, "model"),
@@ -1724,6 +1726,13 @@ func openAIToAnthropic(openAI map[string]any) map[string]any {
 	}
 
 	contentBlocks := []any{}
+	if reasoning := reasoningContent(msg); reasoning != "" {
+		contentBlocks = append(contentBlocks, map[string]any{
+			"type":      "thinking",
+			"thinking":  reasoning,
+			"signature": proxyThinkingSignature(messageID, reasoning),
+		})
+	}
 	if text != "" {
 		contentBlocks = append(contentBlocks, map[string]any{"type": "text", "text": text})
 	}
@@ -1809,7 +1818,8 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	openAIReq := anthropicToOpenAI(req)
 	estimatedInputTokens := estimateChatInputTokens(openAIReq)
 
-	log.Printf("  anthropic: model=%s stream=%v msgs=%d", req.Model, req.Stream, len(req.Messages))
+	log.Printf("  anthropic: model=%s stream=%v msgs=%d history_reasoning_chars=%d",
+		req.Model, req.Stream, len(req.Messages), reasoningHistoryChars(openAIReq))
 
 	reqLog := RequestLog{StartedAt: time.Now(), Protocol: "anthropic", Model: req.Model, Stream: req.Stream}
 
@@ -1836,7 +1846,15 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		}
 		defer resp.Body.Close()
 		if req.Stream {
-			handleAnthropicStream(w, resp, nil, &reqLog, estimatedInputTokens)
+			prepared, diagnostic, prepareErr := prepareSemanticChatStream(resp)
+			if prepareErr != nil {
+				finalizeRequestLog(&reqLog, diagnostic.Usage, time.Time{}, reqLog.StartedAt, false, prepareErr.Error())
+				log.Printf("  anthropic zen stream rejected: finish=%s reasoning_chars=%d thinking_tokens=%d error=%v",
+					diagnostic.FinishReason, diagnostic.ReasoningChars, diagnostic.Usage.Reasoning, prepareErr)
+				writeAnthropicError(w, http.StatusBadGateway, "api_error", prepareErr.Error())
+				return
+			}
+			handleAnthropicStream(w, prepared, nil, &reqLog, estimatedInputTokens)
 		} else {
 			var raw map[string]any
 			if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
@@ -1886,10 +1904,16 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, acc, err := callClineAPI(openAIReq, true)
+	resp, acc, diagnostic, err := callClineAnthropicStream(openAIReq)
 	if err != nil {
+		if acc != nil {
+			reqLog.AccountID = acc.AccountID
+			reqLog.AccountEmail = acc.Email
+		}
 		log.Printf("  anthropic api error: %v", err)
-		finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
+		log.Printf("  anthropic stream rejected: finish=%s reasoning_chars=%d thinking_tokens=%d",
+			diagnostic.FinishReason, diagnostic.ReasoningChars, diagnostic.Usage.Reasoning)
+		finalizeRequestLog(&reqLog, diagnostic.Usage, time.Time{}, reqLog.StartedAt, false, err.Error())
 		writeAnthropicError(w, http.StatusBadGateway, "api_error", err.Error())
 		return
 	}
@@ -1915,6 +1939,16 @@ func estimateChatInputTokens(params map[string]any) int {
 		return 1
 	}
 	return tokens
+}
+
+func reasoningHistoryChars(params map[string]any) int {
+	messages, _ := params["messages"].([]any)
+	total := 0
+	for _, rawMessage := range messages {
+		message, _ := rawMessage.(map[string]any)
+		total += len([]rune(reasoningContent(message)))
+	}
+	return total
 }
 
 func handleAnthropicCountTokens(w http.ResponseWriter, r *http.Request) {
@@ -1983,8 +2017,47 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 	nextContentIndex := 0
 	textIndex := -1
 	hasText := false
+	textOpen := false
+	thinkingIndex := -1
+	thinkingOpen := false
+	var thinkingText strings.Builder
+	reasoningChars := 0
 	pendingTools := map[int]*toolAccumulator{}
 	toolOrder := []int{}
+	emittedTools := 0
+	upstreamFinishReason := ""
+	var streamFailure error
+
+	closeTextBlock := func() {
+		if !textOpen {
+			return
+		}
+		emit("content_block_stop", map[string]any{
+			"type":  "content_block_stop",
+			"index": textIndex,
+		})
+		textOpen = false
+	}
+
+	closeThinkingBlock := func() {
+		if !thinkingOpen {
+			return
+		}
+		emit("content_block_delta", map[string]any{
+			"type":  "content_block_delta",
+			"index": thinkingIndex,
+			"delta": map[string]any{
+				"type":      "signature_delta",
+				"signature": proxyThinkingSignature(msgID, thinkingText.String()),
+			},
+		})
+		emit("content_block_stop", map[string]any{
+			"type":  "content_block_stop",
+			"index": thinkingIndex,
+		})
+		thinkingOpen = false
+		thinkingText.Reset()
+	}
 
 	emitToolBlock := func(acc *toolAccumulator, index int) {
 		args := strings.TrimSpace(acc.args)
@@ -2023,6 +2096,13 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				streamFailure = fmt.Errorf("read upstream stream: %w", err)
+				emit("error", map[string]any{
+					"type":  "error",
+					"error": map[string]any{"type": "api_error", "message": streamFailure.Error()},
+				})
+			}
 			break
 		}
 		line = strings.TrimRight(line, "\r\n")
@@ -2058,6 +2138,7 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 			errBody, _ := json.Marshal(errPayload)
 			log.Printf("  upstream SSE error: %s", string(errBody))
 			emit("error", map[string]any{"type": "error", "error": errPayload})
+			streamFailure = streamError(errPayload)
 			break
 		}
 
@@ -2075,12 +2156,42 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 			delta = choice
 		}
 
+		if reasoning := reasoningContent(delta); reasoning != "" {
+			closeTextBlock()
+			if !thinkingOpen {
+				thinkingIndex = nextContentIndex
+				nextContentIndex++
+				thinkingOpen = true
+				emit("content_block_start", map[string]any{
+					"type":  "content_block_start",
+					"index": thinkingIndex,
+					"content_block": map[string]any{
+						"type":      "thinking",
+						"thinking":  "",
+						"signature": "",
+					},
+				})
+			}
+			thinkingText.WriteString(reasoning)
+			reasoningChars += len([]rune(reasoning))
+			emit("content_block_delta", map[string]any{
+				"type":  "content_block_delta",
+				"index": thinkingIndex,
+				"delta": map[string]any{
+					"type":     "thinking_delta",
+					"thinking": reasoning,
+				},
+			})
+		}
+
 		// Text content delta
 		if c, ok := delta["content"].(string); ok && c != "" {
-			if !hasText {
+			closeThinkingBlock()
+			if !textOpen {
 				hasText = true
 				textIndex = nextContentIndex
 				nextContentIndex++
+				textOpen = true
 				emit("content_block_start", map[string]any{
 					"type":  "content_block_start",
 					"index": textIndex,
@@ -2102,6 +2213,10 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 
 		// Tool calls - accumulate and emit when complete
 		if tcRaw, ok := delta["tool_calls"].([]any); ok {
+			if len(tcRaw) > 0 {
+				closeThinkingBlock()
+				closeTextBlock()
+			}
 			for _, tc := range tcRaw {
 				tcMap, _ := tc.(map[string]any)
 				if tcMap == nil {
@@ -2133,6 +2248,7 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 
 		// Finish reason
 		if fr, ok := choice["finish_reason"].(string); ok && fr != "" {
+			upstreamFinishReason = fr
 			switch fr {
 			case "length":
 				stopReason = "max_tokens"
@@ -2142,12 +2258,14 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 		}
 	}
 
-	// Stop text block if active
-	if hasText {
-		emit("content_block_stop", map[string]any{
-			"type":  "content_block_stop",
-			"index": textIndex,
-		})
+	closeThinkingBlock()
+	closeTextBlock()
+
+	if streamFailure != nil {
+		finalizeRequestLog(reqLog, latestUsage, firstOutputAt, reqLog.StartedAt, false, streamFailure.Error())
+		log.Printf("  anthropic stream failed: finish=%s text=%v tools=%d reasoning_chars=%d error=%v",
+			upstreamFinishReason, hasText, len(pendingTools), reasoningChars, streamFailure)
+		return
 	}
 
 	// OpenAI streams function arguments in arbitrary JSON fragments. Emit the
@@ -2159,9 +2277,22 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 		}
 		emitToolBlock(acc, nextContentIndex)
 		nextContentIndex++
+		emittedTools++
 	}
 	if len(toolOrder) > 0 {
 		stopReason = "tool_use"
+	}
+	if !hasText && emittedTools == 0 {
+		emptyErr := fmt.Errorf("%w (finish=%s reasoning_chars=%d thinking_tokens=%d)",
+			errEmptyResponseContent, upstreamFinishReason, reasoningChars, latestUsage.Reasoning)
+		emit("error", map[string]any{
+			"type":  "error",
+			"error": map[string]any{"type": "api_error", "message": emptyErr.Error()},
+		})
+		finalizeRequestLog(reqLog, latestUsage, firstOutputAt, reqLog.StartedAt, false, emptyErr.Error())
+		log.Printf("  anthropic stream empty: finish=%s reasoning_chars=%d thinking_tokens=%d",
+			upstreamFinishReason, reasoningChars, latestUsage.Reasoning)
+		return
 	}
 
 	finalUsage := anthropicUsageFromOpenAI(map[string]any{"usage": latestRawUsage})
@@ -2177,7 +2308,8 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 	finalizeRequestLog(reqLog, latestUsage, firstOutputAt, reqLog.StartedAt, true, "")
 
 	emit("message_stop", map[string]any{"type": "message_stop"})
-	log.Printf("  anthropic stream done: hasText=%v tools=%d reason=%s", hasText, len(pendingTools), stopReason)
+	log.Printf("  anthropic stream done: hasText=%v tools=%d reason=%s upstream_finish=%s reasoning_chars=%d thinking_tokens=%d",
+		hasText, emittedTools, stopReason, upstreamFinishReason, reasoningChars, latestUsage.Reasoning)
 }
 
 func normalizeOpenAIResponse(obj map[string]any) map[string]any {
