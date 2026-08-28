@@ -1,8 +1,12 @@
 package main
 
-import "time"
+import (
+	"sync"
+	"time"
+)
 
 type Account struct {
+	tokenMu          sync.Mutex
 	AccountID        string    `json:"accountId"`
 	Email            string    `json:"email"`
 	RefreshToken     string    `json:"refreshToken"`

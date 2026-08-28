@@ -477,6 +477,8 @@ func startProxy(host string, port int) error {
 
 	// 启动后台冷却恢复巡检
 	startCooldownRecovery()
+	// 主动刷新即将过期的账号 Token，避免长连接或空闲后首个请求才触发续期。
+	startTokenRefreshScheduler()
 
 	fmt.Println("")
 	fmt.Println(strings.Repeat("=", 58))
@@ -666,7 +668,7 @@ func callClineAPIWithAccount(acc *Account, params map[string]any, stream bool) (
 		resp.Body.Close()
 		// Refresh token and retry
 		if err := refreshAccountToken(acc); err == nil {
-			token = acc.AccessToken
+			token = currentAccountAccessToken(acc)
 			req.Header = clineHeaders(token, sessionID)
 			resp, err = httpClient.Do(req)
 			if err != nil {

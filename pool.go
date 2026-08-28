@@ -11,10 +11,31 @@ import (
 )
 
 var (
-	pool     *AccountPool
-	poolMu   sync.Mutex
-	poolPath string
+	pool                      *AccountPool
+	poolMu                    sync.Mutex
+	poolSaveMu                sync.Mutex
+	poolPath                  string
+	tokenRefreshSchedulerOnce sync.Once
 )
+
+const (
+	tokenRefreshCheckInterval = time.Minute
+	tokenRefreshAhead         = 5 * time.Minute
+)
+
+type tokenRefreshFailure struct {
+	AccountID string `json:"accountId"`
+	Email     string `json:"email"`
+	Error     string `json:"error"`
+}
+
+type tokenRefreshSummary struct {
+	Total     int                   `json:"total"`
+	Refreshed int                   `json:"refreshed"`
+	Skipped   int                   `json:"skipped"`
+	Failed    int                   `json:"failed"`
+	Failures  []tokenRefreshFailure `json:"failures,omitempty"`
+}
 
 func init() {
 	poolPath = resolveDataPath(".cline-accounts.json")
@@ -87,6 +108,9 @@ func loadPool() *AccountPool {
 }
 
 func savePool() {
+	poolSaveMu.Lock()
+	defer poolSaveMu.Unlock()
+
 	data, err := json.MarshalIndent(pool, "", "  ")
 	if err != nil {
 		log.Printf("Failed to encode accounts: %v", err)
@@ -134,10 +158,30 @@ func getAccountByID(accountID string) *Account {
 }
 
 func refreshAccountToken(acc *Account) error {
-	resp, err := refreshClineToken(acc.RefreshToken)
-	if err != nil {
+	if acc == nil {
+		return fmt.Errorf("account is nil")
+	}
+
+	acc.tokenMu.Lock()
+	defer acc.tokenMu.Unlock()
+	return refreshAccountTokenLocked(acc)
+}
+
+func refreshAccountTokenLocked(acc *Account) error {
+	if acc.RefreshToken == "" {
 		acc.Status = "expired"
 		savePool()
+		return fmt.Errorf("refresh token is empty")
+	}
+
+	resp, err := refreshClineToken(acc.RefreshToken)
+	if err != nil {
+		// A proactive refresh can fail transiently while the current access token
+		// is still usable. Keep that account active so the scheduler can retry.
+		if acc.AccessToken == "" || time.Now().UnixMilli() >= acc.ExpiresAt {
+			acc.Status = "expired"
+			savePool()
+		}
 		return fmt.Errorf("token refresh failed: %w", err)
 	}
 
@@ -149,6 +193,107 @@ func refreshAccountToken(acc *Account) error {
 	acc.Status = "active"
 	savePool()
 	return nil
+}
+
+func snapshotAccounts() []*Account {
+	p := loadPool()
+	poolMu.Lock()
+	defer poolMu.Unlock()
+
+	accounts := make([]*Account, len(p.Accounts))
+	copy(accounts, p.Accounts)
+	return accounts
+}
+
+func refreshAllAccountTokens(accounts []*Account) tokenRefreshSummary {
+	summary := tokenRefreshSummary{Total: len(accounts)}
+	for _, acc := range accounts {
+		if acc == nil {
+			summary.Failed++
+			summary.Failures = append(summary.Failures, tokenRefreshFailure{Error: "missing refresh token"})
+			continue
+		}
+		if err := refreshAccountToken(acc); err != nil {
+			summary.Failed++
+			summary.Failures = append(summary.Failures, tokenRefreshFailure{
+				AccountID: acc.AccountID,
+				Email:     acc.Email,
+				Error:     truncate(err.Error(), 200),
+			})
+			continue
+		}
+		summary.Refreshed++
+	}
+	return summary
+}
+
+func currentAccountAccessToken(acc *Account) string {
+	if acc == nil {
+		return ""
+	}
+	acc.tokenMu.Lock()
+	defer acc.tokenMu.Unlock()
+	return acc.AccessToken
+}
+
+func refreshAccountTokenIfExpiring(acc *Account, now time.Time, refreshBefore time.Duration) (bool, error) {
+	if acc == nil {
+		return false, nil
+	}
+
+	acc.tokenMu.Lock()
+	defer acc.tokenMu.Unlock()
+
+	if acc.Status != "active" {
+		return false, nil
+	}
+	if acc.AccessToken != "" && acc.ExpiresAt > now.Add(refreshBefore).UnixMilli() {
+		return false, nil
+	}
+	if err := refreshAccountTokenLocked(acc); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func refreshExpiringAccountTokens(accounts []*Account, now time.Time, refreshBefore time.Duration) tokenRefreshSummary {
+	summary := tokenRefreshSummary{Total: len(accounts)}
+	for _, acc := range accounts {
+		refreshed, err := refreshAccountTokenIfExpiring(acc, now, refreshBefore)
+		if err != nil {
+			summary.Failed++
+			summary.Failures = append(summary.Failures, tokenRefreshFailure{
+				AccountID: acc.AccountID,
+				Email:     acc.Email,
+				Error:     truncate(err.Error(), 200),
+			})
+			continue
+		}
+		if refreshed {
+			summary.Refreshed++
+		} else {
+			summary.Skipped++
+		}
+	}
+	return summary
+}
+
+func startTokenRefreshScheduler() {
+	tokenRefreshSchedulerOnce.Do(func() {
+		go func() {
+			ticker := time.NewTicker(tokenRefreshCheckInterval)
+			defer ticker.Stop()
+			for now := range ticker.C {
+				summary := refreshExpiringAccountTokens(snapshotAccounts(), now, tokenRefreshAhead)
+				if summary.Refreshed > 0 || summary.Failed > 0 {
+					log.Printf("token refresh check: refreshed=%d failed=%d", summary.Refreshed, summary.Failed)
+				}
+				for _, failure := range summary.Failures {
+					log.Printf("token refresh check failed: account=%s error=%s", truncateEmail(failure.Email), failure.Error)
+				}
+			}
+		}()
+	})
 }
 
 func pickAccount() *Account {
@@ -271,11 +416,18 @@ func pickAccountLocked(p *AccountPool) *Account {
 }
 
 func ensureAccountToken(acc *Account) (string, error) {
+	if acc == nil {
+		return "", fmt.Errorf("account is nil")
+	}
+
+	acc.tokenMu.Lock()
+	defer acc.tokenMu.Unlock()
+
 	if acc.AccessToken != "" && time.Now().UnixMilli() < acc.ExpiresAt {
 		return acc.AccessToken, nil
 	}
 
-	if err := refreshAccountToken(acc); err != nil {
+	if err := refreshAccountTokenLocked(acc); err != nil {
 		return "", err
 	}
 

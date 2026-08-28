@@ -113,6 +113,18 @@ var apiMessages = map[string]map[locale]string{
 		localeZH: "全部 Token 已刷新",
 		localeEN: "All tokens refreshed",
 	},
+	"tokens_refreshed_count": {
+		localeZH: "已刷新 %d 个账号 Token",
+		localeEN: "Refreshed tokens for %d accounts",
+	},
+	"tokens_refresh_partial": {
+		localeZH: "Token 刷新完成：成功 %d 个，失败 %d 个",
+		localeEN: "Token refresh finished: %d succeeded, %d failed",
+	},
+	"tokens_refresh_none": {
+		localeZH: "没有可刷新的账号",
+		localeEN: "No accounts to refresh",
+	},
 	"accounts_deleted": {
 		localeZH: "全部账号已删除",
 		localeEN: "All accounts deleted",

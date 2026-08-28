@@ -1526,8 +1526,8 @@ async function deleteAllAccounts() {
 
 async function refreshAllTokens() {
   try {
-    await api('POST', '/accounts/refresh-all', {});
-    toast(t('全部 Token 已刷新'), 'success');
+    const result = await api('POST', '/accounts/refresh-all', {});
+    toast(result.message || t('全部 Token 已刷新'), 'success');
     loadAccounts(); loadStats();
   } catch (e) { toast(t('刷新失败: ') + e.message, 'error'); }
 }

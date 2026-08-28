@@ -30,6 +30,7 @@ Cline2API is a reverse proxy for the Cline API with multi-account rotation, dual
 - **API key auth**: protects proxy endpoints; generate/delete multiple API keys
 - **System Prompt override**: place an `override.md` next to the executable to replace the system prompt for all requests
 - **Account import/export**: OAuth login, manual tokens, batch file import, and cross-device export
+- **Automatic token renewal**: checks every minute and refreshes account tokens 5 minutes before expiry, with request-time and 401 retry fallbacks
 - **Request logs**: per-request token usage, latency, TPS, and more
 - **Desktop app**: single-file cross-platform app (Wails v2); closing the window stops the service
 

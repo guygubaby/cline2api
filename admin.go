@@ -709,15 +709,32 @@ func handleAdminRefreshAll(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
 		return
 	}
-	p := loadPool()
-	poolMu.Lock()
-	for _, a := range p.Accounts {
-		if err := refreshAccountToken(a); err != nil {
-			log.Printf("Refresh failed for %s: %v", a.Email, err)
-		}
+	summary := refreshAllAccountTokens(snapshotAccounts())
+	if summary.Total == 0 {
+		writeAPI(w, http.StatusOK, apiResponse{Success: true, Data: summary, Message: tAPI(r, "tokens_refresh_none")})
+		return
 	}
-	poolMu.Unlock()
-		writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: tAPI(r, "tokens_refreshed")})
+	if summary.Failed == 0 {
+		writeAPI(w, http.StatusOK, apiResponse{
+			Success: true,
+			Data:    summary,
+			Message: tAPI(r, "tokens_refreshed_count", summary.Refreshed),
+		})
+		return
+	}
+
+	for _, failure := range summary.Failures {
+		log.Printf("Refresh failed for %s: %s", truncateEmail(failure.Email), failure.Error)
+	}
+	status := http.StatusMultiStatus
+	if summary.Refreshed == 0 {
+		status = http.StatusBadGateway
+	}
+	writeAPI(w, status, apiResponse{
+		Success: false,
+		Data:    summary,
+		Error:   tAPI(r, "tokens_refresh_partial", summary.Refreshed, summary.Failed),
+	})
 }
 
 // POST /admin/api/accounts/delete-all
