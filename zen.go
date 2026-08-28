@@ -167,15 +167,45 @@ func isZenFreeModel(m Model) bool {
 	return false
 }
 
-// routeModel 三态路由："zen" / "reject" / "cline"。
-// 故障转移开启且 zen 连续失败期间，免费模型请求临时改走 cline 账号池。
-func routeModel(id string) string {
+const (
+	modelRouteZen            = "zen"
+	modelRouteCline          = "cline"
+	modelRouteReject         = "reject"
+	modelRouteZenUnavailable = "zen_unavailable"
+)
+
+type modelRouteDecision struct {
+	Route string
+	Model string
+}
+
+var zenClineFallbackModels = map[string]string{
+	"deepseek-v4-flash-free": "deepseek/deepseek-v4-flash",
+	"laguna-s-2.1-free":      "poolside/laguna-s-2.1:free",
+}
+
+func availableClineFallback(zenModel string) (string, bool) {
+	fallback, ok := zenClineFallbackModels[zenModel]
+	if !ok {
+		return "", false
+	}
+	for _, model := range getAllModels() {
+		if model.ID == fallback && !isZenSource(model) && model.Status == "active" {
+			return fallback, true
+		}
+	}
+	return "", false
+}
+
+// resolveModelRoute separates client-facing model IDs from upstream IDs.
+// Zen uses bare IDs, while Cline requires provider/model IDs.
+func resolveModelRoute(id string) modelRouteDecision {
 	m, ok := resolveZenInfo(id)
 	if !ok {
-		return "cline"
+		return modelRouteDecision{Route: modelRouteCline, Model: id}
 	}
 	if !isZenFreeModel(m) {
-		return "reject"
+		return modelRouteDecision{Route: modelRouteReject, Model: m.ID}
 	}
 	// 极端情况：同名 ID 同时是 cline 模型（自定义冲突）→ 让给 cline
 	p := loadPool()
@@ -183,17 +213,25 @@ func routeModel(id string) string {
 	for _, pm := range p.Models {
 		if !isZenSource(pm) && pm.ID == strings.TrimPrefix(strings.TrimSpace(id), "opencode/") {
 			poolMu.Unlock()
-			return "cline"
+			return modelRouteDecision{Route: modelRouteCline, Model: id}
 		}
 	}
 	poolMu.Unlock()
 
 	cfg := getZenConfig()
 	if cfg.Failover && zenFailedNow() {
-		log.Printf("  failover: zen degraded, %q routed to cline pool", id)
-		return "cline"
+		if fallback, available := availableClineFallback(m.ID); available {
+			log.Printf("  failover: zen degraded, %q routed to cline model %q", id, fallback)
+			return modelRouteDecision{Route: modelRouteCline, Model: fallback}
+		}
+		log.Printf("  failover: zen degraded, %q has no compatible cline model", id)
+		return modelRouteDecision{Route: modelRouteZenUnavailable, Model: m.ID}
 	}
-	return "zen"
+	return modelRouteDecision{Route: modelRouteZen, Model: m.ID}
+}
+
+func routeModel(id string) string {
+	return resolveModelRoute(id).Route
 }
 
 // ============ zen 配置 ============
@@ -344,7 +382,7 @@ func markZenFail() {
 	zenFailCount++
 	if zenFailCount >= thr {
 		zenFailUntil = time.Now().Add(time.Duration(window) * time.Minute)
-		log.Printf("  zen failover armed: %d consecutive failures, routing to cline pool for %dm", zenFailCount, window)
+		log.Printf("  zen failover armed: %d consecutive failures, compatible models use cline for %dm", zenFailCount, window)
 	}
 	zenStateMu.Unlock()
 }
@@ -550,13 +588,14 @@ func callZenAPI(params map[string]any, stream bool) (*http.Response, error) {
 
 		resp, err := getZenHTTPClient().Do(req)
 		if err != nil {
-			// 网络错误：退避重试（不计入故障转移，瞬时可恢复）
+			// 网络错误：先退避重试，耗尽后计入故障转移。
 			if attempt < retries {
 				log.Printf("  zen network error (%v), retry %d/%d after %v", err, attempt+1, retries, delay)
 				time.Sleep(withRetryJitter(delay))
 				delay *= 2
 				continue
 			}
+			markZenFail()
 			return nil, fmt.Errorf("zen request: %w", err)
 		}
 		if resp.StatusCode == http.StatusOK {
@@ -591,7 +630,11 @@ func callZenAPI(params map[string]any, stream bool) (*http.Response, error) {
 			return nil, fmt.Errorf("%s", reason)
 		}
 
-		markZenFail()
+		// 4xx 通常是单次请求、模型或凭据问题，不能让一个客户端错误把
+		// 所有 Zen 模型切进 Cline。只有服务端错误才触发全局故障转移。
+		if resp.StatusCode >= http.StatusInternalServerError {
+			markZenFail()
+		}
 		return nil, fmt.Errorf("%s", reason)
 	}
 }
@@ -773,9 +816,9 @@ func startZenModelsRefresher() {
 // ============ 最近一次同步结果（管理后台展示） ============
 
 var (
-	lastZenSync     modelSyncResult
-	lastZenSyncRan  bool
-	lastZenSyncMu   sync.Mutex
+	lastZenSync    modelSyncResult
+	lastZenSyncRan bool
+	lastZenSyncMu  sync.Mutex
 )
 
 func setLastZenModelSync(res modelSyncResult) {
@@ -812,9 +855,9 @@ func opencodeUsageToday() map[string]any {
 		total += e.TotalTokens
 	}
 	return map[string]any{
-		"requests":         requests,
-		"inputTokens":      input,
-		"outputTokens":     output,
-		"totalTokens":      total,
+		"requests":     requests,
+		"inputTokens":  input,
+		"outputTokens": output,
+		"totalTokens":  total,
 	}
 }

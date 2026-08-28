@@ -834,14 +834,19 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 
 	chat := responsesToChat(params)
 	chatModel, _ := chat["model"].(string)
-	route := routeModel(chatModel)
+	route := resolveModelRoute(chatModel)
 
-	switch route {
-	case "reject":
+	switch route.Route {
+	case modelRouteReject:
 		finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, "paid zen model rejected")
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", fmt.Sprintf("model %q is a paid opencode model; only free models are proxied", chatModel))
 		return
-	case "zen":
+	case modelRouteZenUnavailable:
+		msg := fmt.Sprintf("opencode zen is temporarily unavailable and model %q has no compatible cline fallback", chatModel)
+		finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, msg)
+		writeOpenAIError(w, http.StatusServiceUnavailable, "service_unavailable_error", msg)
+		return
+	case modelRouteZen:
 		reqLog.Upstream = upstreamOpenCode
 		zm, _ := resolveZenInfo(chatModel)
 		out := maybeCompact(chat, zm, requestSessionID(chat, r.Header))
@@ -878,6 +883,9 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, chatToResponsesWithRequest(out2, params))
 
 	default: // cline
+		if route.Model != "" && route.Model != chatModel {
+			chat["model"] = route.Model
+		}
 		reqLog.Upstream = upstreamCline
 		if !isStream {
 			out, acc, err := callClineNonStream(chat)

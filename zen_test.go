@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -122,6 +123,75 @@ func TestRouteModelClinePassthrough(t *testing.T) {
 	}
 	if got := routeModel(""); got != "cline" {
 		t.Errorf("routeModel(empty) = %q, want cline", got)
+	}
+}
+
+func TestDegradedZenOnlyModelDoesNotLeakIntoCline(t *testing.T) {
+	withZenPool(t, []Model{
+		{ID: "big-pickle", Provider: "opencode", Cost: "free", Status: "active", Source: "zen"},
+	})
+	zenStateMu.Lock()
+	zenFailUntil = time.Now().Add(5 * time.Minute)
+	zenStateMu.Unlock()
+
+	if got := routeModel("big-pickle"); got != "zen_unavailable" {
+		t.Fatalf("routeModel(degraded zen-only model) = %q, want zen_unavailable", got)
+	}
+}
+
+func TestDegradedZenModelUsesExplicitClineFallback(t *testing.T) {
+	withZenPool(t, []Model{
+		{ID: "deepseek-v4-flash-free", Provider: "opencode", Cost: "free", Status: "active", Source: "zen"},
+		{ID: "deepseek/deepseek-v4-flash", Provider: "deepseek", Cost: "free", Status: "active", Source: "remote"},
+	})
+	zenStateMu.Lock()
+	zenFailUntil = time.Now().Add(5 * time.Minute)
+	zenStateMu.Unlock()
+
+	decision := resolveModelRoute("deepseek-v4-flash-free")
+	if decision.Route != modelRouteCline || decision.Model != "deepseek/deepseek-v4-flash" {
+		t.Fatalf("route decision = %#v, want explicit cline fallback", decision)
+	}
+}
+
+func TestZenBadRequestDoesNotArmGlobalFailover(t *testing.T) {
+	withZenPool(t, []Model{
+		{ID: "big-pickle", Provider: "opencode", Cost: "free", Status: "active", Source: "zen"},
+	})
+	cfg := getZenConfig()
+	cfg.BaseURL = "https://zen.test/v1"
+	cfg.Retries = 1
+
+	zenTransportMu.Lock()
+	oldClient := zenHTTPClient
+	zenHTTPClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusBadRequest,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"error":"bad request"}`)),
+			Request:    request,
+		}, nil
+	})}
+	zenTransportMu.Unlock()
+	t.Cleanup(func() {
+		zenTransportMu.Lock()
+		zenHTTPClient = oldClient
+		zenTransportMu.Unlock()
+	})
+
+	params := map[string]any{
+		"model": "big-pickle",
+		"messages": []any{
+			map[string]any{"role": "user", "content": "hello"},
+		},
+	}
+	for range 3 {
+		if _, err := callZenAPI(params, false); err == nil {
+			t.Fatal("callZenAPI unexpectedly succeeded")
+		}
+	}
+	if zenFailedNow() {
+		t.Fatal("three request-specific 400 responses must not arm global failover")
 	}
 }
 
@@ -348,9 +418,9 @@ func TestBuildZenBodyRewritesModelAndStripsReasoning(t *testing.T) {
 
 func TestResponsesToChatStringInput(t *testing.T) {
 	out := responsesToChat(map[string]any{
-		"model":            "m1",
-		"input":            "hello",
-		"instructions":     "be brief",
+		"model":             "m1",
+		"input":             "hello",
+		"instructions":      "be brief",
 		"max_output_tokens": 500.0,
 	})
 	msgs := out["messages"].([]any)

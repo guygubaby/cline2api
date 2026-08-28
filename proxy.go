@@ -356,13 +356,19 @@ func startProxy(host string, port int) error {
 		}
 
 		// 按 model 自动分流：zen 免费模型 / zen 付费拒绝 / 其余走 Cline 池
-		switch routeModel(model) {
-		case "reject":
+		route := resolveModelRoute(model)
+		switch route.Route {
+		case modelRouteReject:
 			msg := fmt.Sprintf("model %q is a paid opencode model; only free models are proxied", model)
 			finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, msg)
 			writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", msg)
 			return
-		case "zen":
+		case modelRouteZenUnavailable:
+			msg := fmt.Sprintf("opencode zen is temporarily unavailable and model %q has no compatible cline fallback", model)
+			finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, msg)
+			writeOpenAIError(w, http.StatusServiceUnavailable, "service_unavailable_error", msg)
+			return
+		case modelRouteZen:
 			reqLog.Upstream = upstreamOpenCode
 			zm, _ := resolveZenInfo(model)
 			out := maybeCompact(params, zm, requestSessionID(params, r.Header))
@@ -383,6 +389,9 @@ func startProxy(host string, port int) error {
 				handleNonStreamResponse(w, resp, nil, &reqLog)
 			}
 			return
+		}
+		if route.Model != "" && route.Model != model {
+			params["model"] = route.Model
 		}
 
 		if activeCount == 0 && len(loadPool().Accounts) == 0 {
@@ -1826,13 +1835,19 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	reqLog := RequestLog{StartedAt: time.Now(), Protocol: "anthropic", Model: req.Model, Stream: req.Stream}
 
 	// 按 model 自动分流（与 chat 端点一致）：zen 免费/付费拒绝/Cline 池
-	switch routeModel(req.Model) {
-	case "reject":
+	route := resolveModelRoute(req.Model)
+	switch route.Route {
+	case modelRouteReject:
 		msg := fmt.Sprintf("model %q is a paid opencode model; only free models are proxied", req.Model)
 		finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, msg)
 		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", msg)
 		return
-	case "zen":
+	case modelRouteZenUnavailable:
+		msg := fmt.Sprintf("opencode zen is temporarily unavailable and model %q has no compatible cline fallback", req.Model)
+		finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, msg)
+		writeAnthropicError(w, 529, "overloaded_error", msg)
+		return
+	case modelRouteZen:
 		reqLog.Upstream = upstreamOpenCode
 		zm, _ := resolveZenInfo(req.Model)
 		out := maybeCompact(openAIReq, zm, requestSessionID(map[string]any{"session_id": r.Header.Get("x-opencode-session")}, nil))
@@ -1871,6 +1886,9 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, anthropicResp)
 		}
 		return
+	}
+	if route.Model != "" && route.Model != req.Model {
+		openAIReq["model"] = route.Model
 	}
 
 	activeCount := 0

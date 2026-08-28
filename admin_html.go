@@ -1121,7 +1121,7 @@ const I18N = {
   '代理列表': 'Proxy list',
   '无冷却': 'None cooling',
   '已停用': 'Paused',
-  '故障转移中（opencode 暂不可用，请求走 Cline 池）': 'Failover active (opencode unavailable, requests routed to Cline pool)',
+  '故障转移中（兼容模型走 Cline，其余暂时不可用）': 'Failover active (compatible models use Cline; others are temporarily unavailable)',
   '正常': 'Healthy',
   '已同步模型': 'Models synced',
   '接入 opencode（zen）免费模型。按请求中的模型名自动分流：免费模型走 opencode 上游，付费模型直接拒绝，其余走 Cline 账号池。': 'Integrates opencode (zen) free models. Requests are routed automatically by model name: free models go to the opencode upstream, paid models are rejected, everything else goes to the Cline account pool.',
@@ -1925,7 +1925,7 @@ async function loadOcConfig() {
     const rt = c.runtime || {};
     let status;
     if (!c.enabled) status = '<span style="color:var(--text3)">⏸ ' + t('已停用') + '</span>';
-    else if (rt.failoverActive) status = '<span style="color:var(--red)">🔴 ' + t('故障转移中（opencode 暂不可用，请求走 Cline 池）') + '</span>';
+    else if (rt.failoverActive) status = '<span style="color:var(--red)">🔴 ' + t('故障转移中（兼容模型走 Cline，其余暂时不可用）') + '</span>';
     else status = '<span style="color:var(--green)">🟢 ' + t('正常') + '</span>' +
       '<span style="margin-left:8px">' + t('已同步模型') + ': ' + (c.syncedModels || 0) + '</span>';
     _('ocRuntimeStatus').innerHTML = status;
