@@ -1230,7 +1230,7 @@ func handleAdminStats(w http.ResponseWriter, r *http.Request) {
 			"completionTokens": completionTokens,
 			"totalTokens":      totalTokens,
 			"cachedTokens":     cachedTokens,
-			"strategy":         "round_robin",
+			"strategy":         getProxyConfig().Strategy,
 			"version":          appVersion,
 			// opencode zen 免费模型今日用量（从请求日志聚合）
 			"opencodeToday": opencodeUsageToday(),
