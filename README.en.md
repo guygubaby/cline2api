@@ -103,6 +103,10 @@ Authentication accepts both OpenAI's `Authorization: Bearer <key>` and Anthropic
 
 For client-side non-streaming DeepSeek requests, the Cline upstream is called with SSE and then aggregated back into the requested non-streaming protocol. Aggregation preserves visible text, parallel tool calls, reasoning fields, usage, and finish reason. A reasoning-only result retries at most once with another account and is never exposed as the final answer.
 
+Usage metadata follows each protocol's standard fields: OpenAI Chat uses `prompt_tokens` / `completion_tokens` / `total_tokens`; Responses uses `input_tokens` / `output_tokens` plus cache and reasoning details; Anthropic reports fresh input, cache read, cache creation, output, and thinking counters separately. Because the Cline upstream only reports exact usage at the end of a stream, Anthropic `message_start` carries a local input estimate while the final `message_delta` carries the exact breakdown. This preserves real-time TTFT while allowing Claude Code session logs to show context usage.
+
+`GET /v1/models` returns the Anthropic Models shape, including `max_input_tokens` and `max_tokens`, when the request includes `anthropic-version`. OpenAI requests keep the standard basic Model object without non-standard context fields.
+
 ### 3. Account export/import (device migration)
 
 - **Export**: click "Export" on the Accounts page to download `cline-accounts-export.json`

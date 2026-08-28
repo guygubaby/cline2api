@@ -104,6 +104,10 @@ Model:    cline-free/glm-5.2
 
 DeepSeek 的客户端非流式请求会在 Cline 上游使用 SSE，再聚合为客户端所需的非流式格式。聚合保留正文、并行工具调用、推理字段、usage 与结束原因；若只有推理而没有正文或工具调用，最多换一个账号重试一次，不会把隐藏推理冒充最终答案。
 
+Usage 元数据按各协议的标准字段返回：OpenAI Chat 使用 `prompt_tokens` / `completion_tokens` / `total_tokens`，Responses 使用 `input_tokens` / `output_tokens` 及 cache/reasoning details，Anthropic 使用独立的 input、cache read、cache creation、output 与 thinking counters。由于 Cline 上游只在流结束时给出真实 usage，Anthropic `message_start` 的 input 是本地预估值，最终 `message_delta` 会返回真实明细；这可兼顾 Claude Code session log 的上下文显示与实时 TTFT。
+
+`GET /v1/models` 在收到 `anthropic-version` 请求头时返回 Anthropic Models 标准结构，包括 `max_input_tokens` 与 `max_tokens`；OpenAI 请求仍保持其标准的基础 Model 对象，不添加非标准 context 字段。
+
 ### 3. 账号导出/导入（跨设备迁移）
 
 - **导出**：账号管理页面点击「导出」按钮，下载 `cline-accounts-export.json`

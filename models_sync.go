@@ -141,6 +141,10 @@ func syncClineModels() modelSyncResult {
 				continue
 			}
 			seen[m.ID] = true
+			contextTokens := m.MaxInput
+			if contextTokens == 0 {
+				contextTokens = m.ContextWin
+			}
 			remote = append(remote, Model{
 				ID:       m.ID,
 				Provider: remoteProvider(m.ID),
@@ -148,6 +152,8 @@ func syncClineModels() modelSyncResult {
 				Status:   "active",
 				Custom:   false,
 				Source:   "remote",
+				Context:  contextTokens,
+				Output:   m.MaxTokens,
 			})
 		}
 	}

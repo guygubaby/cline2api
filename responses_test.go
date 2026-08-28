@@ -127,6 +127,31 @@ func TestChatStreamToResponsesEmitsStandardLifecycleAndParallelTools(t *testing.
 	}
 }
 
+func TestUsageToResponsesPreservesCacheWriteAndReasoningDetails(t *testing.T) {
+	parsed := parseTokenUsage(map[string]any{
+		"prompt_tokens":     float64(100),
+		"completion_tokens": float64(20),
+		"total_tokens":      float64(120),
+		"prompt_tokens_details": map[string]any{
+			"cached_tokens":      float64(30),
+			"cache_write_tokens": float64(5),
+		},
+		"completion_tokens_details": map[string]any{
+			"reasoning_tokens": float64(12),
+		},
+	})
+
+	usage := usageToResponses(parsed)
+	inputDetails := usage["input_tokens_details"].(map[string]any)
+	outputDetails := usage["output_tokens_details"].(map[string]any)
+	if inputDetails["cached_tokens"] != int64(30) || inputDetails["cache_write_tokens"] != int64(5) {
+		t.Fatalf("input details = %#v", inputDetails)
+	}
+	if outputDetails["reasoning_tokens"] != int64(12) {
+		t.Fatalf("output details = %#v", outputDetails)
+	}
+}
+
 func decodeSSEEvents(t *testing.T, body string) []map[string]any {
 	t.Helper()
 	var events []map[string]any

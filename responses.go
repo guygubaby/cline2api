@@ -783,9 +783,9 @@ func chatStreamToResponses(w http.ResponseWriter, upstream *http.Response, reqLo
 
 // usageToResponses 把聚合的 tokenUsage 转成 Responses usage 结构。
 func usageToResponses(u tokenUsage) map[string]any {
-	cached := any(0)
-	if u.Cached > 0 {
-		cached = u.Cached
+	cacheRead := u.CacheRead
+	if cacheRead == 0 && u.CacheWrite == 0 && u.Cached > 0 {
+		cacheRead = u.Cached
 	}
 	total := u.Total
 	if total == 0 {
@@ -794,12 +794,12 @@ func usageToResponses(u tokenUsage) map[string]any {
 	return map[string]any{
 		"input_tokens": u.Prompt,
 		"input_tokens_details": map[string]any{
-			"cached_tokens":      cached,
-			"cache_write_tokens": 0,
+			"cached_tokens":      cacheRead,
+			"cache_write_tokens": u.CacheWrite,
 		},
 		"output_tokens": u.Completion,
 		"output_tokens_details": map[string]any{
-			"reasoning_tokens": 0,
+			"reasoning_tokens": u.Reasoning,
 		},
 		"total_tokens": total,
 	}

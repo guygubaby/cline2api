@@ -22,7 +22,7 @@ func TestHandleAnthropicStreamPreservesFragmentedToolInput(t *testing.T) {
 	startedAt := time.Now()
 	reqLog := &RequestLog{StartedAt: startedAt, Protocol: "anthropic", Stream: true}
 
-	handleAnthropicStream(recorder, upstream, nil, reqLog)
+	handleAnthropicStream(recorder, upstream, nil, reqLog, 0)
 
 	body := recorder.Body.String()
 	if !strings.Contains(body, `"content_block":{"id":"call_1","input":{},"name":"Bash","type":"tool_use"}`) {
@@ -185,7 +185,7 @@ func TestOpenAIToAnthropicUsesCurrentMessageEnvelope(t *testing.T) {
 		t.Fatalf("stop_sequence is required in a standard Messages response: %#v", response)
 	}
 	usage := response["usage"].(map[string]any)
-	if usage["input_tokens"] != float64(12) || usage["output_tokens"] != float64(3) || usage["cache_read_input_tokens"] != float64(4) {
+	if usage["input_tokens"] != int64(8) || usage["output_tokens"] != int64(3) || usage["cache_read_input_tokens"] != int64(4) {
 		t.Fatalf("usage mapping = %#v", usage)
 	}
 }
@@ -234,7 +234,7 @@ func TestAnthropicStreamStartsWithCurrentMessageShape(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	reqLog := &RequestLog{StartedAt: time.Now(), Protocol: "anthropic", Model: "m1", Stream: true}
 
-	handleAnthropicStream(recorder, upstream, nil, reqLog)
+	handleAnthropicStream(recorder, upstream, nil, reqLog, 42)
 
 	events := decodeSSEEvents(t, recorder.Body.String())
 	start := firstEventOfType(t, events, "message_start")
@@ -247,5 +247,36 @@ func TestAnthropicStreamStartsWithCurrentMessageShape(t *testing.T) {
 	}
 	if _, ok := message["usage"].(map[string]any); !ok {
 		t.Fatalf("usage missing: %#v", message)
+	}
+	if message["usage"].(map[string]any)["input_tokens"] != float64(42) {
+		t.Fatalf("estimated input usage missing from message_start: %#v", message["usage"])
+	}
+}
+
+func TestAnthropicStreamReportsFinalInputCacheAndReasoningUsage(t *testing.T) {
+	upstreamBody := strings.Join([]string{
+		`data: {"model":"m1","choices":[{"delta":{"content":"hi"}}]}`,
+		`data: {"model":"m1","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":120,"completion_tokens":15,"total_tokens":135,"prompt_tokens_details":{"cached_tokens":40,"cache_write_tokens":7},"completion_tokens_details":{"reasoning_tokens":9}}}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	upstream := &http.Response{Body: io.NopCloser(strings.NewReader(upstreamBody))}
+	recorder := httptest.NewRecorder()
+	reqLog := &RequestLog{StartedAt: time.Now(), Protocol: "anthropic", Model: "m1", Stream: true}
+
+	handleAnthropicStream(recorder, upstream, nil, reqLog, 0)
+
+	events := decodeSSEEvents(t, recorder.Body.String())
+	delta := firstEventOfType(t, events, "message_delta")
+	usage := delta["usage"].(map[string]any)
+	if usage["input_tokens"] != float64(73) || usage["output_tokens"] != float64(15) {
+		t.Fatalf("input/output usage = %#v", usage)
+	}
+	if usage["cache_read_input_tokens"] != float64(40) || usage["cache_creation_input_tokens"] != float64(7) {
+		t.Fatalf("cache usage = %#v", usage)
+	}
+	details, _ := usage["output_tokens_details"].(map[string]any)
+	if details["thinking_tokens"] != float64(9) {
+		t.Fatalf("thinking usage = %#v", usage)
 	}
 }

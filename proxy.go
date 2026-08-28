@@ -300,21 +300,7 @@ func startProxy(host string, port int) error {
 	}
 
 	modelsHandler := apiKeyHandler(func(w http.ResponseWriter, r *http.Request) {
-		all := getAllModels()
-		list := make([]map[string]any, len(all))
-		for i, m := range all {
-			ownedBy := "cline"
-			if m.Source == "zen" || m.Provider == "opencode" {
-				ownedBy = "opencode"
-			}
-			list[i] = map[string]any{
-				"id":       m.ID,
-				"object":   "model",
-				"created":  time.Now().Unix(),
-				"owned_by": ownedBy,
-			}
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": list})
+		writeJSON(w, http.StatusOK, buildModelsResponse(getAllModels(), isAnthropicModelsRequest(r)))
 	})
 	mux.HandleFunc("/v1/models", modelsHandler)
 	mux.HandleFunc("/models", modelsHandler)
@@ -854,7 +840,26 @@ type tokenUsage struct {
 	Completion int64
 	Total      int64
 	Cached     int64
+	CacheRead  int64
+	CacheWrite int64
+	Reasoning  int64
 	Valid      bool
+}
+
+func tokenCount(value any) int64 {
+	switch number := value.(type) {
+	case float64:
+		return int64(number)
+	case int:
+		return int64(number)
+	case int64:
+		return number
+	case json.Number:
+		parsed, _ := number.Int64()
+		return parsed
+	default:
+		return 0
+	}
 }
 
 func parseTokenUsage(value any) tokenUsage {
@@ -864,8 +869,10 @@ func parseTokenUsage(value any) tokenUsage {
 	}
 	read := func(keys ...string) int64 {
 		for _, key := range keys {
-			if value, ok := usage[key].(float64); ok && value >= 0 {
-				return int64(value)
+			if value := tokenCount(usage[key]); value >= 0 {
+				if _, exists := usage[key]; exists {
+					return value
+				}
 			}
 		}
 		return 0
@@ -876,23 +883,38 @@ func parseTokenUsage(value any) tokenUsage {
 			return 0
 		}
 		for _, key := range keys {
-			if value, ok := details[key].(float64); ok && value >= 0 {
-				return int64(value)
+			if value := tokenCount(details[key]); value >= 0 {
+				if _, exists := details[key]; exists {
+					return value
+				}
 			}
 		}
 		return 0
 	}
 	prompt := read("prompt_tokens", "input_tokens")
 	completion := read("completion_tokens", "output_tokens")
-	cached := int64(0)
-	if nested := readNested("prompt_tokens_details", "cached_tokens"); nested > 0 {
-		cached = nested
-	} else if nested := readNested("input_tokens_details", "cached_tokens"); nested > 0 {
-		cached = nested
-	} else if v := read("cache_read_input_tokens") + read("cache_creation_input_tokens"); v > 0 {
-		cached = v
-	} else {
-		cached = read("prompt_cache_hit_tokens", "prompt_cache_creation_tokens", "cached_tokens")
+	nestedCacheRead := readNested("prompt_tokens_details", "cached_tokens")
+	if nestedCacheRead == 0 {
+		nestedCacheRead = readNested("input_tokens_details", "cached_tokens")
+	}
+	cacheRead := nestedCacheRead
+	if cacheRead == 0 {
+		cacheRead = read("cache_read_input_tokens", "prompt_cache_hit_tokens", "cached_tokens")
+	}
+	cacheWrite := readNested("prompt_tokens_details", "cache_write_tokens")
+	if cacheWrite == 0 {
+		cacheWrite = readNested("input_tokens_details", "cache_write_tokens")
+	}
+	if cacheWrite == 0 {
+		cacheWrite = read("cache_creation_input_tokens", "prompt_cache_creation_tokens")
+	}
+	reasoning := readNested("completion_tokens_details", "reasoning_tokens", "thinking_tokens")
+	if reasoning == 0 {
+		reasoning = readNested("output_tokens_details", "reasoning_tokens", "thinking_tokens")
+	}
+	cached := cacheRead + cacheWrite
+	if nestedCacheRead > 0 {
+		cached = cacheRead
 	}
 	total := read("total_tokens")
 	if total == 0 {
@@ -921,7 +943,11 @@ func parseTokenUsage(value any) tokenUsage {
 			}
 		}
 	}
-	return tokenUsage{Prompt: prompt, Completion: completion, Total: total, Cached: cached, Valid: hasUsage}
+	return tokenUsage{
+		Prompt: prompt, Completion: completion, Total: total,
+		Cached: cached, CacheRead: cacheRead, CacheWrite: cacheWrite, Reasoning: reasoning,
+		Valid: hasUsage,
+	}
 }
 
 func mergeTokenUsage(current, next tokenUsage) tokenUsage {
@@ -939,6 +965,15 @@ func mergeTokenUsage(current, next tokenUsage) tokenUsage {
 	}
 	if next.Cached != 0 {
 		current.Cached = next.Cached
+	}
+	if next.CacheRead != 0 {
+		current.CacheRead = next.CacheRead
+	}
+	if next.CacheWrite != 0 {
+		current.CacheWrite = next.CacheWrite
+	}
+	if next.Reasoning != 0 {
+		current.Reasoning = next.Reasoning
 	}
 	current.Valid = current.Valid || next.Valid
 	if current.Total == 0 && (current.Prompt != 0 || current.Completion != 0) {
@@ -1594,34 +1629,50 @@ func anthropicToOpenAI(req anthropicReq) map[string]any {
 }
 
 func anthropicUsageFromOpenAI(openAI map[string]any) map[string]any {
-	inputTokens := any(0)
-	outputTokens := any(0)
-	cacheReadTokens := any(0)
-	cacheCreationTokens := any(0)
+	inputTokens := int64(0)
+	outputTokens := int64(0)
+	cacheReadTokens := int64(0)
+	cacheCreationTokens := int64(0)
+	thinkingTokens := int64(0)
 	usage, _ := openAI["usage"].(map[string]any)
 	if usage != nil {
-		if value := usage["prompt_tokens"]; value != nil {
-			inputTokens = value
-		} else if value := usage["input_tokens"]; value != nil {
-			inputTokens = value
+		cacheReadTokens = tokenCount(usage["cache_read_input_tokens"])
+		cacheCreationTokens = tokenCount(usage["cache_creation_input_tokens"])
+		inputDetails, _ := usage["prompt_tokens_details"].(map[string]any)
+		if inputDetails == nil {
+			inputDetails, _ = usage["input_tokens_details"].(map[string]any)
 		}
-		if value := usage["completion_tokens"]; value != nil {
-			outputTokens = value
-		} else if value := usage["output_tokens"]; value != nil {
-			outputTokens = value
-		}
-		if value := usage["cache_read_input_tokens"]; value != nil {
-			cacheReadTokens = value
-		}
-		if value := usage["cache_creation_input_tokens"]; value != nil {
-			cacheCreationTokens = value
-		}
-		if details, _ := usage["prompt_tokens_details"].(map[string]any); details != nil {
-			if value := details["cached_tokens"]; value != nil {
+		if inputDetails != nil {
+			if value := tokenCount(inputDetails["cached_tokens"]); value > 0 {
 				cacheReadTokens = value
 			}
-			if value := details["cache_write_tokens"]; value != nil {
+			if value := tokenCount(inputDetails["cache_write_tokens"]); value > 0 {
 				cacheCreationTokens = value
+			}
+		}
+
+		if promptTokens := tokenCount(usage["prompt_tokens"]); promptTokens > 0 {
+			// OpenAI prompt_tokens includes cached tokens. Anthropic reports fresh,
+			// cache-read, and cache-creation input as separate additive counters.
+			inputTokens = promptTokens - cacheReadTokens - cacheCreationTokens
+			if inputTokens < 0 {
+				inputTokens = 0
+			}
+		} else {
+			inputTokens = tokenCount(usage["input_tokens"])
+		}
+		outputTokens = tokenCount(usage["completion_tokens"])
+		if outputTokens == 0 {
+			outputTokens = tokenCount(usage["output_tokens"])
+		}
+		outputDetails, _ := usage["completion_tokens_details"].(map[string]any)
+		if outputDetails == nil {
+			outputDetails, _ = usage["output_tokens_details"].(map[string]any)
+		}
+		if outputDetails != nil {
+			thinkingTokens = tokenCount(outputDetails["reasoning_tokens"])
+			if thinkingTokens == 0 {
+				thinkingTokens = tokenCount(outputDetails["thinking_tokens"])
 			}
 		}
 	}
@@ -1630,6 +1681,9 @@ func anthropicUsageFromOpenAI(openAI map[string]any) map[string]any {
 		"cache_creation_input_tokens": cacheCreationTokens,
 		"cache_read_input_tokens":     cacheReadTokens,
 		"output_tokens":               outputTokens,
+		"output_tokens_details": map[string]any{
+			"thinking_tokens": thinkingTokens,
+		},
 	}
 }
 
@@ -1753,6 +1807,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	openAIReq := anthropicToOpenAI(req)
+	estimatedInputTokens := estimateChatInputTokens(openAIReq)
 
 	log.Printf("  anthropic: model=%s stream=%v msgs=%d", req.Model, req.Stream, len(req.Messages))
 
@@ -1781,7 +1836,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		}
 		defer resp.Body.Close()
 		if req.Stream {
-			handleAnthropicStream(w, resp, nil, &reqLog)
+			handleAnthropicStream(w, resp, nil, &reqLog, estimatedInputTokens)
 		} else {
 			var raw map[string]any
 			if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
@@ -1845,7 +1900,21 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		reqLog.AccountEmail = acc.Email
 	}
 
-	handleAnthropicStream(w, resp, acc, &reqLog)
+	handleAnthropicStream(w, resp, acc, &reqLog, estimatedInputTokens)
+}
+
+func estimateChatInputTokens(params map[string]any) int {
+	input := map[string]any{"messages": params["messages"]}
+	for _, key := range []string{"tools", "tool_choice", "response_format"} {
+		if value, ok := params[key]; ok {
+			input[key] = value
+		}
+	}
+	tokens := estimateJSON(input)
+	if tokens < 1 {
+		return 1
+	}
+	return tokens
 }
 
 func handleAnthropicCountTokens(w http.ResponseWriter, r *http.Request) {
@@ -1867,14 +1936,11 @@ func handleAnthropicCountTokens(w http.ResponseWriter, r *http.Request) {
 		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "messages is required")
 		return
 	}
-	inputTokens := estimateJSON(anthropicToOpenAI(req))
-	if inputTokens < 1 {
-		inputTokens = 1
-	}
+	inputTokens := estimateChatInputTokens(anthropicToOpenAI(req))
 	writeJSON(w, http.StatusOK, map[string]any{"input_tokens": inputTokens})
 }
 
-func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *Account, reqLog *RequestLog) {
+func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *Account, reqLog *RequestLog, estimatedInputTokens int) {
 	log.Printf("  anthropic stream: starting real-time forward")
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -1906,7 +1972,7 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 			"stop_reason":   nil,
 			"stop_sequence": nil,
 			"usage": map[string]any{
-				"input_tokens":                0,
+				"input_tokens":                estimatedInputTokens,
 				"cache_creation_input_tokens": 0,
 				"cache_read_input_tokens":     0,
 				"output_tokens":               0,
@@ -1951,6 +2017,7 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 
 	reader := bufio.NewReader(upstream.Body)
 	var latestUsage tokenUsage
+	var latestRawUsage map[string]any
 	var firstOutputAt time.Time
 
 	for {
@@ -1975,6 +2042,9 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 			if d, ok := data.(map[string]any); ok {
 				obj = d
 			}
+		}
+		if rawUsage, ok := obj["usage"].(map[string]any); ok {
+			latestRawUsage = rawUsage
 		}
 		if usage := parseTokenUsage(obj["usage"]); usage.Valid {
 			latestUsage = mergeTokenUsage(latestUsage, usage)
@@ -2094,15 +2164,14 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 		stopReason = "tool_use"
 	}
 
+	finalUsage := anthropicUsageFromOpenAI(map[string]any{"usage": latestRawUsage})
 	emit("message_delta", map[string]any{
 		"type": "message_delta",
 		"delta": map[string]any{
 			"stop_reason":   stopReason,
 			"stop_sequence": nil,
 		},
-		"usage": map[string]any{
-			"output_tokens": latestUsage.Completion,
-		},
+		"usage": finalUsage,
 	})
 	recordTokenUsage(acc, reqLog.Model, latestUsage)
 	finalizeRequestLog(reqLog, latestUsage, firstOutputAt, reqLog.StartedAt, true, "")
