@@ -13,7 +13,7 @@ RUN CGO_ENABLED=0 go build \
     -ldflags="-s -w -X main.appVersion=${APP_VERSION}" \
     -o cline-proxy .
 
-FROM alpine:3.21
+FROM docker.1ms.run/alpine:3.21
 
 RUN apk add --no-cache ca-certificates tzdata
 WORKDIR /app
