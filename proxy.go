@@ -19,9 +19,9 @@ import (
 )
 
 const (
-	defaultMaxTokens       = 128000
-	defaultReasoningEffort = "high"
-	fallbackDefaultModel   = "cline-free/glm-5.2"
+	defaultMaxTokens        = 128000
+	smallAuxiliaryMaxTokens = 256
+	fallbackDefaultModel    = "cline-free/glm-5.2"
 )
 
 // builtinModels 是内置默认模型列表（不可删除），仅作为离线 / 未同步时的 fallback。
@@ -196,7 +196,7 @@ var passThroughKeys = []string{
 	"tools", "tool_choice", "parallel_tool_calls", "functions", "function_call",
 	"temperature", "top_p", "top_k", "stop", "presence_penalty", "frequency_penalty",
 	"response_format", "user", "n", "logit_bias", "seed", "logprobs", "top_logprobs",
-	"stream_options", "metadata",
+	"stream_options", "metadata", "thinking",
 }
 
 type chatRequest struct {
@@ -550,10 +550,9 @@ func buildUpstreamBody(params map[string]any, stream bool) map[string]any {
 	}
 
 	body := map[string]any{
-		"model":            model,
-		"max_tokens":       maxTokens,
-		"session_id":       sessionID,
-		"reasoning_effort": defaultReasoningEffort,
+		"model":      model,
+		"max_tokens": maxTokens,
+		"session_id": sessionID,
 	}
 
 	if msgsRaw, ok := params["messages"]; ok {
@@ -568,10 +567,25 @@ func buildUpstreamBody(params map[string]any, stream bool) map[string]any {
 		body["stream"] = true
 	}
 
+	explicitReasoning := false
 	if re, ok := params["reasoning_effort"].(string); ok && re != "" {
 		body["reasoning_effort"] = re
+		explicitReasoning = true
 	} else if re, ok := params["reasoningEffort"].(string); ok && re != "" {
 		body["reasoning_effort"] = re
+		explicitReasoning = true
+	}
+
+	hasTools := false
+	for _, key := range []string{"tools", "functions"} {
+		if tools, ok := params[key].([]any); ok && len(tools) > 0 {
+			hasTools = true
+			break
+		}
+	}
+	_, explicitThinking := params["thinking"]
+	if strings.Contains(model, "deepseek-v4") && !stream && maxTokens <= smallAuxiliaryMaxTokens && !hasTools && !explicitReasoning && !explicitThinking {
+		body["thinking"] = map[string]any{"type": "disabled"}
 	}
 
 	for _, key := range passThroughKeys {
@@ -633,8 +647,8 @@ func callClineAPIWithAccount(acc *Account, params map[string]any, stream bool) (
 			toolCount = len(t)
 		}
 	}
-	log.Printf("  upstream: account=%s stream=%v tools=%d msgs=%d max_tokens=%v effort=%v",
-		truncateEmail(acc.Email), stream, toolCount, getMsgCount(params), body["max_tokens"], body["reasoning_effort"])
+	log.Printf("  upstream: account=%s stream=%v tools=%d msgs=%d max_tokens=%v effort=%v thinking=%v",
+		truncateEmail(acc.Email), stream, toolCount, getMsgCount(params), body["max_tokens"], body["reasoning_effort"], body["thinking"])
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -1195,11 +1209,10 @@ func loadOverrideContent() string {
 		return ""
 	}
 	content := strings.TrimSpace(string(data))
-	if content != "" {
-		log.Printf("  using override.md as system prompt (%d bytes)", len(content))
-	} else {
-		log.Printf("  override.md is empty")
+	if content == "" {
+		return ""
 	}
+	log.Printf("  using override.md as system prompt (%d bytes)", len(content))
 	return content
 }
 
