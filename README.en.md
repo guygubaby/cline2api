@@ -184,9 +184,19 @@ Files are looked up in this order: executable directory → working directory �
 |------|---------|
 | `.cline-accounts.json` | Account pool, API keys, custom models and default model |
 | `.cline-request-logs.json` | Request logs |
+| `.cline-zen.json` | OpenCode Zen, proxy, and compaction settings |
 | `override.md` | System Prompt override (optional) |
 
 > ⚠️ The account file contains plaintext refreshTokens — treat it as sensitive. Never ship it in a release package or commit it to Git.
+
+Docker Compose persists these state files with bind mounts. Ensure they exist before the first deployment:
+
+```bash
+touch .cline-accounts.json .cline-request-logs.json .cline-zen.json override.md
+chmod 600 .cline-accounts.json .cline-request-logs.json .cline-zen.json
+```
+
+The application prefers atomic temp-file replacement. If Docker rejects `rename` over a file bind mount, it automatically falls back to a synced direct write so accounts, API keys, Zen settings, and request logs survive restarts.
 
 ## Available Models
 

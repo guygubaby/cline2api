@@ -190,9 +190,19 @@ git push origin v1.0.0
 |------|------|
 | `.cline-accounts.json` | 账号池、API Key、自定义模型与默认模型 |
 | `.cline-request-logs.json` | 请求日志 |
+| `.cline-zen.json` | OpenCode Zen 配置、代理与压缩设置 |
 | `override.md` | System Prompt 覆盖（可选）|
 
 > ⚠️ 账号文件含明文 refreshToken，属于敏感凭据，不要放入发布包或提交到 Git。
+
+Docker Compose 使用单文件 bind mount 持久化以上状态。首次部署前请确保文件存在：
+
+```bash
+touch .cline-accounts.json .cline-request-logs.json .cline-zen.json override.md
+chmod 600 .cline-accounts.json .cline-request-logs.json .cline-zen.json
+```
+
+程序优先使用临时文件原子替换；若 Docker 单文件挂载拒绝 `rename`，会自动回退为同步写入挂载文件，确保账号、API Key、Zen 配置与请求日志重启后不会回退。
 
 ## 可用模型
 

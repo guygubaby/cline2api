@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"sort"
 	"sync"
@@ -92,13 +93,12 @@ func pruneRequestLogsLocked(entries []RequestLog) []RequestLog {
 func saveRequestLogsLocked() {
 	data, err := json.MarshalIndent(requestLogs, "", "  ")
 	if err != nil {
+		log.Printf("Failed to encode request logs: %v", err)
 		return
 	}
-	tmp := requestLogsPath + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
-		return
+	if err := writeFileDurably(requestLogsPath, data, 0600); err != nil {
+		log.Printf("Failed to save request logs: %v", err)
 	}
-	_ = os.Rename(tmp, requestLogsPath)
 }
 
 func appendRequestLog(entry RequestLog) {

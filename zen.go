@@ -292,8 +292,12 @@ func setZenConfig(c *zenConfigData) {
 	zenConfig = c
 	zenConfigMu.Unlock()
 
-	data, _ := json.MarshalIndent(c, "", "  ")
-	if err := os.WriteFile(resolveDataPath(".cline-zen.json"), data, 0600); err != nil {
+	data, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		log.Printf("zen config encode failed: %v", err)
+		return
+	}
+	if err := writeFileDurably(resolveDataPath(".cline-zen.json"), data, 0600); err != nil {
 		log.Printf("zen config save failed: %v", err)
 	}
 	rebuildZenTransport()

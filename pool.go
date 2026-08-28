@@ -87,8 +87,12 @@ func loadPool() *AccountPool {
 }
 
 func savePool() {
-	data, _ := json.MarshalIndent(pool, "", "  ")
-	if err := os.WriteFile(poolPath, data, 0600); err != nil {
+	data, err := json.MarshalIndent(pool, "", "  ")
+	if err != nil {
+		log.Printf("Failed to encode accounts: %v", err)
+		return
+	}
+	if err := writeFileDurably(poolPath, data, 0600); err != nil {
 		log.Printf("Failed to save accounts: %v", err)
 	}
 }

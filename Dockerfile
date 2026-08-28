@@ -21,8 +21,6 @@ COPY --from=builder /build/cline-proxy .
 
 EXPOSE 3457
 
-VOLUME ["/app/data"]
-
 ENV PORT=3457
 ENV CLINE_PROXY_HOST=0.0.0.0
 

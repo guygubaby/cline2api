@@ -112,8 +112,12 @@ func loadCredentials() *credentials {
 
 func saveCredentials(rt string) {
 	c := credentials{RefreshToken: rt}
-	data, _ := json.MarshalIndent(c, "", "  ")
-	if err := os.WriteFile(credentialsPath, data, 0600); err != nil {
+	data, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		log.Printf("Failed to encode credentials: %v", err)
+		return
+	}
+	if err := writeFileDurably(credentialsPath, data, 0600); err != nil {
 		log.Printf("Failed to save credentials: %v", err)
 		return
 	}
