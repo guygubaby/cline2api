@@ -12,12 +12,88 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
+)
+
+const (
+	semanticEmptyCircuitTTL        = 2 * time.Minute
+	semanticEmptyCircuitMaxEntries = 1024
+	semanticEmptyErrorCode         = "semantic_empty"
+	semanticEmptyClientHint        = "upstream returned no usable text or tool call after retry; compact this conversation with /compact or start a new session with /clear"
 )
 
 type semanticStreamDiagnostic struct {
 	ReasoningChars int
 	FinishReason   string
 	Usage          tokenUsage
+}
+
+type semanticEmptyCircuitEntry struct {
+	diagnostic semanticStreamDiagnostic
+	expiresAt  time.Time
+}
+
+var (
+	semanticEmptyCircuits   = map[string]semanticEmptyCircuitEntry{}
+	semanticEmptyCircuitsMu sync.Mutex
+)
+
+func pruneSemanticEmptyCircuitsLocked(now time.Time) {
+	for key, entry := range semanticEmptyCircuits {
+		if !now.Before(entry.expiresAt) {
+			delete(semanticEmptyCircuits, key)
+		}
+	}
+}
+
+func semanticRequestFingerprint(params map[string]any) string {
+	hash := sha256.New()
+	encoder := json.NewEncoder(hash)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(params); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(hash.Sum(nil))
+}
+
+func activeSemanticEmptyCircuit(fingerprint string, now time.Time) (semanticStreamDiagnostic, bool) {
+	if fingerprint == "" {
+		return semanticStreamDiagnostic{}, false
+	}
+	semanticEmptyCircuitsMu.Lock()
+	defer semanticEmptyCircuitsMu.Unlock()
+
+	pruneSemanticEmptyCircuitsLocked(now)
+	entry, ok := semanticEmptyCircuits[fingerprint]
+	if !ok {
+		return semanticStreamDiagnostic{}, false
+	}
+	return entry.diagnostic, true
+}
+
+func rememberSemanticEmptyCircuit(fingerprint string, diagnostic semanticStreamDiagnostic, now time.Time) {
+	if fingerprint == "" {
+		return
+	}
+	semanticEmptyCircuitsMu.Lock()
+	pruneSemanticEmptyCircuitsLocked(now)
+	if len(semanticEmptyCircuits) >= semanticEmptyCircuitMaxEntries {
+		var oldestKey string
+		var oldestExpiry time.Time
+		for key, entry := range semanticEmptyCircuits {
+			if oldestKey == "" || entry.expiresAt.Before(oldestExpiry) {
+				oldestKey = key
+				oldestExpiry = entry.expiresAt
+			}
+		}
+		delete(semanticEmptyCircuits, oldestKey)
+	}
+	semanticEmptyCircuits[fingerprint] = semanticEmptyCircuitEntry{
+		diagnostic: diagnostic,
+		expiresAt:  now.Add(semanticEmptyCircuitTTL),
+	}
+	semanticEmptyCircuitsMu.Unlock()
 }
 
 type replayReadCloser struct {

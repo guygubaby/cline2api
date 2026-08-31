@@ -107,7 +107,7 @@ DeepSeek 的客户端非流式请求会在 Cline 上游使用 SSE，再聚合为
 
 Usage 元数据按各协议的标准字段返回：OpenAI Chat 使用 `prompt_tokens` / `completion_tokens` / `total_tokens`，Responses 使用 `input_tokens` / `output_tokens` 及 cache/reasoning details，Anthropic 使用独立的 input、cache read、cache creation、output 与 thinking counters。由于 Cline 上游只在流结束时给出真实 usage，Anthropic `message_start` 的 input 是本地预估值，最终 `message_delta` 会返回真实明细；这可兼顾 Claude Code session log 的上下文显示与实时 TTFT。
 
-Anthropic 流式转换会把 Cline/DeepSeek 的 `reasoning_content` 输出为标准 `thinking` block，并在后续工具调用历史中恢复为上游要求的 reasoning。代理会在提交客户端 SSE 前确认上游至少返回正文或工具调用；reasoning-only / 仅 EOS 的空流最多换一个账号重试一次，仍为空则返回标准错误并在请求日志中记为失败。
+Anthropic 流式转换会把 Cline/DeepSeek 的 `reasoning_content` 输出为标准 `thinking` block，并在后续工具调用历史中恢复为上游要求的 reasoning。代理会在提交客户端 SSE 前确认上游至少返回正文或工具调用；reasoning-only / 仅 EOS 的空流最多换一个账号重试一次。仍为空时返回不可重试的 `400 invalid_request_error`，提示客户端执行 `/compact` 或 `/clear`；相同请求的 SHA-256 指纹会短时熔断，避免重试风暴，指纹不保存会话内容。
 
 `GET /v1/models` 在收到 `anthropic-version` 请求头时返回 Anthropic Models 标准结构，包括 `max_input_tokens` 与 `max_tokens`；OpenAI 请求仍保持其标准的基础 Model 对象，不添加非标准 context 字段。
 

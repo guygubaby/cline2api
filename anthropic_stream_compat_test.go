@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"io"
@@ -209,6 +210,146 @@ func TestCallClineAnthropicStreamRetriesOneAlternativeAfterEmptyOutput(t *testin
 	}
 	if !strings.Contains(string(replayed), `"name":"Read"`) {
 		t.Fatalf("prepared retry stream lost the tool call: %s", replayed)
+	}
+}
+
+func TestAnthropicRepeatedSemanticEmptyIsNonRetryableAndCircuitBroken(t *testing.T) {
+	semanticEmptyCircuitsMu.Lock()
+	oldCircuits := semanticEmptyCircuits
+	semanticEmptyCircuits = map[string]semanticEmptyCircuitEntry{}
+	semanticEmptyCircuitsMu.Unlock()
+	t.Cleanup(func() {
+		semanticEmptyCircuitsMu.Lock()
+		semanticEmptyCircuits = oldCircuits
+		semanticEmptyCircuitsMu.Unlock()
+	})
+
+	firstAccount := &Account{
+		AccountID: "semantic-empty-first", Email: "first@example.com", AccessToken: "workos:first",
+		ExpiresAt: time.Now().Add(time.Hour).UnixMilli(), Status: "active", ModelCooldowns: map[string]time.Time{},
+	}
+	secondAccount := &Account{
+		AccountID: "semantic-empty-second", Email: "second@example.com", AccessToken: "workos:second",
+		ExpiresAt: time.Now().Add(time.Hour).UnixMilli(), Status: "active", ModelCooldowns: map[string]time.Time{},
+	}
+	currentPool := loadPool()
+	poolMu.Lock()
+	oldAccounts, oldIndex := currentPool.Accounts, currentPool.CurrentIdx
+	currentPool.Accounts = []*Account{firstAccount, secondAccount}
+	currentPool.CurrentIdx = 0
+	poolMu.Unlock()
+	t.Cleanup(func() {
+		poolMu.Lock()
+		currentPool.Accounts = oldAccounts
+		currentPool.CurrentIdx = oldIndex
+		poolMu.Unlock()
+		savePool()
+	})
+
+	oldHTTPClient := httpClient
+	requestCount := 0
+	httpClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requestCount++
+		body := strings.Join([]string{
+			`data: {"choices":[{"delta":{"reasoning_content":"thinking only"}}]}`,
+			`data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":23000,"completion_tokens":1,"total_tokens":23001,"completion_tokens_details":{"reasoning_tokens":1}}}`,
+			`data: [DONE]`,
+			``,
+		}, "\n")
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    request,
+		}, nil
+	})}
+	t.Cleanup(func() { httpClient = oldHTTPClient })
+
+	requestBody := `{
+		"model":"deepseek/deepseek-v4-flash",
+		"max_tokens":128000,
+		"stream":true,
+		"messages":[{"role":"user","content":"semantic-empty-circuit-regression"}]
+	}`
+	call := func() *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(requestBody))
+		handleAnthropicMessages(recorder, request)
+		return recorder
+	}
+
+	first := call()
+	if first.Code != http.StatusBadRequest {
+		t.Fatalf("first status = %d, want 400; body=%s", first.Code, first.Body.String())
+	}
+	var errorResponse map[string]any
+	if err := json.Unmarshal(first.Body.Bytes(), &errorResponse); err != nil {
+		t.Fatalf("decode first error: %v", err)
+	}
+	errorBody, _ := errorResponse["error"].(map[string]any)
+	if errorBody["type"] != "invalid_request_error" || !strings.Contains(errorBody["message"].(string), "/compact") {
+		t.Fatalf("first error is not actionable/non-retryable: %#v", errorResponse)
+	}
+	if requestCount != 2 {
+		t.Fatalf("first call upstream requests = %d, want primary + one alternate", requestCount)
+	}
+
+	second := call()
+	if second.Code != http.StatusBadRequest {
+		t.Fatalf("second status = %d, want 400; body=%s", second.Code, second.Body.String())
+	}
+	if requestCount != 2 {
+		t.Fatalf("identical retry reached upstream: requests=%d, want 2", requestCount)
+	}
+	page, err := listRequestLogs(1, "")
+	if err != nil || len(page.Items) != 1 {
+		t.Fatalf("read semantic-empty request log: page=%#v err=%v", page, err)
+	}
+	entry := page.Items[0]
+	if entry.ErrorCode != semanticEmptyErrorCode || entry.FinishReason != "stop" || entry.ReasoningChars != len("thinking only") {
+		t.Fatalf("semantic-empty diagnostics missing: %#v", entry)
+	}
+	if entry.ThinkingTokens != 1 || !entry.RetrySuppressed || entry.Upstream != upstreamCline {
+		t.Fatalf("semantic-empty suppression metadata missing: %#v", entry)
+	}
+}
+
+func TestSemanticEmptyCircuitFingerprintIsPrivateSpecificAndExpires(t *testing.T) {
+	first := map[string]any{
+		"model":    "deepseek/deepseek-v4-flash",
+		"messages": []any{map[string]any{"role": "user", "content": "private conversation content"}},
+	}
+	second := map[string]any{
+		"model":    "deepseek/deepseek-v4-flash",
+		"messages": []any{map[string]any{"role": "user", "content": "different conversation content"}},
+	}
+	firstFingerprint := semanticRequestFingerprint(first)
+	secondFingerprint := semanticRequestFingerprint(second)
+	if len(firstFingerprint) != sha256.Size*2 || strings.Contains(firstFingerprint, "private") {
+		t.Fatalf("fingerprint is not an opaque SHA-256 digest: %q", firstFingerprint)
+	}
+	if firstFingerprint == secondFingerprint {
+		t.Fatal("different requests produced the same semantic-empty fingerprint")
+	}
+
+	semanticEmptyCircuitsMu.Lock()
+	oldCircuits := semanticEmptyCircuits
+	semanticEmptyCircuits = map[string]semanticEmptyCircuitEntry{}
+	semanticEmptyCircuitsMu.Unlock()
+	t.Cleanup(func() {
+		semanticEmptyCircuitsMu.Lock()
+		semanticEmptyCircuits = oldCircuits
+		semanticEmptyCircuitsMu.Unlock()
+	})
+
+	now := time.Now()
+	diagnostic := semanticStreamDiagnostic{FinishReason: "stop", ReasoningChars: 5}
+	rememberSemanticEmptyCircuit(firstFingerprint, diagnostic, now)
+	if got, active := activeSemanticEmptyCircuit(firstFingerprint, now.Add(time.Minute)); !active || got.FinishReason != "stop" {
+		t.Fatalf("circuit was not active during TTL: diagnostic=%#v active=%v", got, active)
+	}
+	if _, active := activeSemanticEmptyCircuit(firstFingerprint, now.Add(semanticEmptyCircuitTTL)); active {
+		t.Fatal("semantic-empty circuit did not expire at TTL")
 	}
 }
 

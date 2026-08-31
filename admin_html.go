@@ -2088,6 +2088,16 @@ const formatDuration = ms => {
   return (ms / 1000).toFixed(1) + 's';
 };
 const formatTPS = v => (!v || v <= 0) ? '-' : v.toFixed(1);
+const formatLogDiagnostic = l => {
+  const parts = [];
+  if (l.error) parts.push(l.error);
+  if (l.errorCode) parts.push('code=' + l.errorCode);
+  if (l.finishReason) parts.push('finish=' + l.finishReason);
+  if (l.reasoningChars) parts.push('reasoning_chars=' + l.reasoningChars);
+  if (l.thinkingTokens) parts.push('thinking_tokens=' + l.thinkingTokens);
+  if (l.retrySuppressed) parts.push('retry_suppressed=true');
+  return parts.join(' · ');
+};
 
 async function loadRequestLogs(reset) {
   if (reset) logCursor = '';
@@ -2111,9 +2121,10 @@ async function loadRequestLogs(reset) {
 
     const renderRow = l => {
       const ts = l.startedAt ? new Date(l.startedAt).toLocaleString(LC()) : '-';
+      const diagnostic = formatLogDiagnostic(l);
       const st = l.completed
         ? '<span class="log-status ok">' + t('完成') + '</span>'
-        : '<span class="log-status fail" title="' + esc(l.error || '') + '">' + t('失败') + '</span>';
+        : '<span class="log-status fail" title="' + esc(diagnostic) + '" aria-label="' + esc(t('失败') + (diagnostic ? ': ' + diagnostic : '')) + '">' + t('失败') + '</span>';
       const tk = l.usageAvailable
         ? formatTokenCount(l.inputTokens) + '</td><td>' + formatTokenCount(l.outputTokens) + '</td><td>' + formatTokenCount(l.cachedTokens) + '</td><td>' + formatTokenCount(l.totalTokens)
         : '-</td><td>-</td><td>-</td><td>-';
@@ -2131,11 +2142,12 @@ async function loadRequestLogs(reset) {
     const renderCard = l => {
       const ts = l.startedAt ? new Date(l.startedAt).toLocaleString(LC()) : '-';
       const st = l.completed ? t('完成') : t('失败');
+      const diagnostic = formatLogDiagnostic(l);
       const tk = l.usageAvailable
         ? t('输入 ') + formatTokenCount(l.inputTokens) + t(' · 输出 ') + formatTokenCount(l.outputTokens) + t(' · 缓存 ') + formatTokenCount(l.cachedTokens) + t(' · 总 ') + formatTokenCount(l.totalTokens)
         : t('Token 未知');
       return '<article class="account-card">' +
-        '<div class="account-card-header"><span class="account-email">' + esc(l.accountEmail || '-') + '</span><span class="log-status ' + (l.completed ? 'ok' : 'fail') + '">' + st + '</span></div>' +
+        '<div class="account-card-header"><span class="account-email">' + esc(l.accountEmail || '-') + '</span><span class="log-status ' + (l.completed ? 'ok' : 'fail') + '" title="' + esc(diagnostic) + '" aria-label="' + esc(st + (diagnostic ? ': ' + diagnostic : '')) + '">' + st + '</span></div>' +
         '<div class="account-metrics">' +
           '<div class="account-metric"><span class="account-metric-label">' + t('协议') + '</span><span class="account-metric-value">' + esc(l.protocol || '-') + '</span></div>' +
           '<div class="account-metric"><span class="account-metric-label">' + t('耗时') + '</span><span class="account-metric-value">' + formatDuration(l.durationMs) + '</span></div>' +

@@ -1903,6 +1903,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		writeAnthropicError(w, http.StatusUnauthorized, "authentication_error", "No accounts in pool")
 		return
 	}
+	reqLog.Upstream = upstreamCline
 
 	if !req.Stream {
 		out, acc, err := callClineNonStream(openAIReq)
@@ -1912,7 +1913,6 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 			writeAnthropicError(w, http.StatusBadGateway, "api_error", err.Error())
 			return
 		}
-		reqLog.Upstream = upstreamCline
 		if acc != nil {
 			reqLog.AccountID = acc.AccountID
 			reqLog.AccountEmail = acc.Email
@@ -1921,6 +1921,14 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		recordTokenUsage(acc, reqLog.Model, usage)
 		finalizeRequestLog(&reqLog, usage, time.Time{}, reqLog.StartedAt, true, "")
 		writeJSON(w, http.StatusOK, openAIToAnthropic(out))
+		return
+	}
+
+	requestFingerprint := semanticRequestFingerprint(openAIReq)
+	if circuitDiagnostic, suppressed := activeSemanticEmptyCircuit(requestFingerprint, time.Now()); suppressed {
+		log.Printf("  anthropic semantic-empty circuit: identical request suppressed finish=%s reasoning_chars=%d thinking_tokens=%d",
+			circuitDiagnostic.FinishReason, circuitDiagnostic.ReasoningChars, circuitDiagnostic.Usage.Reasoning)
+		writeAnthropicSemanticEmpty(w, &reqLog, circuitDiagnostic, true)
 		return
 	}
 
@@ -1933,11 +1941,15 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		log.Printf("  anthropic api error: %v", err)
 		log.Printf("  anthropic stream rejected: finish=%s reasoning_chars=%d thinking_tokens=%d",
 			diagnostic.FinishReason, diagnostic.ReasoningChars, diagnostic.Usage.Reasoning)
+		if isEmptyResponseError(err) {
+			rememberSemanticEmptyCircuit(requestFingerprint, diagnostic, time.Now())
+			writeAnthropicSemanticEmpty(w, &reqLog, diagnostic, false)
+			return
+		}
 		finalizeRequestLog(&reqLog, diagnostic.Usage, time.Time{}, reqLog.StartedAt, false, err.Error())
 		writeAnthropicError(w, http.StatusBadGateway, "api_error", err.Error())
 		return
 	}
-	reqLog.Upstream = upstreamCline
 	defer resp.Body.Close()
 	if acc != nil {
 		reqLog.AccountID = acc.AccountID
@@ -1969,6 +1981,20 @@ func reasoningHistoryChars(params map[string]any) int {
 		total += len([]rune(reasoningContent(message)))
 	}
 	return total
+}
+
+func recordSemanticEmptyDiagnostic(reqLog *RequestLog, diagnostic semanticStreamDiagnostic, retrySuppressed bool) {
+	reqLog.ErrorCode = semanticEmptyErrorCode
+	reqLog.FinishReason = diagnostic.FinishReason
+	reqLog.ReasoningChars = diagnostic.ReasoningChars
+	reqLog.ThinkingTokens = diagnostic.Usage.Reasoning
+	reqLog.RetrySuppressed = retrySuppressed
+}
+
+func writeAnthropicSemanticEmpty(w http.ResponseWriter, reqLog *RequestLog, diagnostic semanticStreamDiagnostic, retrySuppressed bool) {
+	recordSemanticEmptyDiagnostic(reqLog, diagnostic, retrySuppressed)
+	finalizeRequestLog(reqLog, diagnostic.Usage, time.Time{}, reqLog.StartedAt, false, semanticEmptyClientHint)
+	writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", semanticEmptyClientHint)
 }
 
 func handleAnthropicCountTokens(w http.ResponseWriter, r *http.Request) {
