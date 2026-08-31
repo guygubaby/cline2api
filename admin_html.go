@@ -205,6 +205,16 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
 .model-group-head.expanded .model-group-caret{transform:rotate(90deg)}
 .model-group-count{font-size:11px;color:var(--text3);font-weight:400;background:var(--surface2);border:1px solid var(--border2);border-radius:8px;padding:0 7px;line-height:16px}
 .model-group-body{margin:2px 0 4px 18px}
+.model-visibility-toolbar{display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+.model-visibility-toolbar .field{flex:1;min-width:220px}
+.model-visibility-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:8px;margin:0;padding:0;border:0}
+.model-visibility-option{display:flex;align-items:flex-start;gap:10px;min-height:48px;padding:11px 12px;border:1px solid var(--border2);border-radius:10px;background:var(--surface);cursor:pointer;transition:background .15s var(--ease),border-color .15s var(--ease)}
+.model-visibility-option:hover{background:var(--surface2);border-color:var(--border)}
+.model-visibility-option input{width:18px;height:18px;margin:1px 0 0;flex:0 0 auto;accent-color:var(--accent)}
+.model-visibility-option-id{display:block;font-family:ui-monospace,'SF Mono','Cascadia Code','Consolas',monospace;font-size:12px;color:var(--text);overflow-wrap:anywhere}
+.model-visibility-option-meta{display:block;margin-top:3px;font-size:11px;color:var(--text3)}
+.model-visibility-summary{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-top:14px;color:var(--text2);font-size:13px}
+.model-visibility-mode{display:inline-flex;align-items:center;padding:3px 9px;border-radius:10px;background:var(--accent-soft);color:var(--accent);font-size:11px;font-weight:600}
 .warn-box{display:flex;align-items:flex-start;gap:8px;margin-top:10px;padding:10px 12px;border-radius:8px;background:var(--yellow-soft);color:var(--yellow);font-size:13px;line-height:1.5;border:1px solid var(--yellow)}
 
 /* action row */
@@ -230,7 +240,8 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
   .section{border-radius:14px;margin-bottom:16px}
   .section-title{padding:14px 16px 7px}
   .section-desc{padding:0 16px 10px}
-  .section-body,.tab-content{padding:16px}
+	  .section-body,.tab-content{padding:16px}
+	  .model-visibility-list{grid-template-columns:1fr}
   .tabs{padding:0 12px;overflow-x:auto;white-space:nowrap}
   .tab{padding:11px 12px;font-size:13px}
   .form-row{flex-direction:column;align-items:stretch;gap:0;margin-bottom:0}
@@ -301,6 +312,10 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
     <div class="nav-item" data-tab="logs">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="16" y2="17"/></svg>
       <span class="nav-label">请求日志</span>
+    </div>
+    <div class="nav-item" data-tab="model-visibility">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+      <span class="nav-label">模型展示</span>
     </div>
     <div class="nav-item" data-tab="settings">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
@@ -525,6 +540,44 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
   </div>
   <div id="logLoadMore" style="display:none;text-align:center;padding:16px">
     <button class="btn btn-primary" onclick="loadRequestLogs(false)">加载更多</button>
+  </div>
+</div>
+
+<div id="tab-model-visibility" class="tab-panel" style="display:none">
+  <div class="page-header">
+    <div>
+      <div class="large-title">模型展示</div>
+      <div class="large-subtitle">配置公开 /v1/models 向用户返回的模型列表</div>
+    </div>
+    <button class="btn btn-sm" type="button" onclick="loadModelVisibility()">刷新</button>
+  </div>
+  <div class="section">
+    <div class="section-title">公开模型列表</div>
+    <div class="section-desc">未配置时返回全部模型；保存选择后，OpenAI 与 Anthropic 的 /v1/models 都只返回勾选项。直接使用已知 Model ID 调用不受影响。</div>
+    <div class="section-body">
+      <form id="modelVisibilityForm" method="post" action="/admin/api/models/visibility" onsubmit="saveModelVisibility(event)">
+        <div class="model-visibility-toolbar">
+          <div class="field">
+            <label for="modelVisibilitySearch">搜索模型</label>
+            <input id="modelVisibilitySearch" name="query" type="search" autocomplete="off" placeholder="输入模型 ID 或提供商" oninput="renderModelVisibility()">
+          </div>
+          <button class="btn btn-sm" type="button" onclick="selectAllListedModels()">全选</button>
+          <button class="btn btn-sm" type="button" onclick="clearListedModels()">清空选择</button>
+          <button class="btn btn-sm" type="button" onclick="resetModelVisibility()">恢复默认全部</button>
+        </div>
+        <fieldset class="model-visibility-list" id="modelVisibilityList" aria-describedby="modelVisibilityHelp">
+          <legend style="position:absolute;clip-path:inset(50%);width:1px;height:1px;overflow:hidden">选择公开展示的模型</legend>
+          <div class="empty">加载中...</div>
+        </fieldset>
+        <div class="model-visibility-summary" id="modelVisibilityHelp" aria-live="polite">
+          <span id="modelVisibilityCount">-</span>
+          <span class="model-visibility-mode" id="modelVisibilityMode">-</span>
+        </div>
+        <div class="form-actions" style="margin-top:14px">
+          <button class="btn btn-primary" id="saveModelVisibilityBtn" type="submit">保存展示列表</button>
+        </div>
+      </form>
+    </div>
   </div>
 </div>
 
@@ -855,6 +908,7 @@ const I18N = {
   '账号管理': 'Accounts',
   '导入账号': 'Import',
   '请求日志': 'Request Logs',
+  '模型展示': 'Model Listing',
   '设置': 'Settings',
   '关于': 'About',
   '反馈': 'Feedback',
@@ -905,6 +959,24 @@ const I18N = {
   '导入全部': 'Import All',
   '选择文件': 'Choose File',
   '查看每次请求的 Token 消耗、缓存、耗时与流式速度': 'Token usage, caching, latency & streaming speed per request',
+  '配置公开 /v1/models 向用户返回的模型列表': 'Choose which models the public /v1/models endpoint returns',
+  '公开模型列表': 'Public Model List',
+  '未配置时返回全部模型；保存选择后，OpenAI 与 Anthropic 的 /v1/models 都只返回勾选项。直接使用已知 Model ID 调用不受影响。': 'Without configuration, all models are returned. After saving, OpenAI and Anthropic /v1/models return only selected models. Direct calls using a known Model ID are unaffected.',
+  '搜索模型': 'Search Models',
+  '输入模型 ID 或提供商': 'Enter a model ID or provider',
+  '全选': 'Select All',
+  '清空选择': 'Clear Selection',
+  '恢复默认全部': 'Restore Default: All',
+  '选择公开展示的模型': 'Select models to list publicly',
+  '保存展示列表': 'Save Model List',
+  '默认：返回全部模型': 'Default: return all models',
+  '自定义展示列表': 'Custom model list',
+  '已选择 ': 'Selected ',
+  ' 个，共 ': ' of ',
+  ' 个模型': ' models',
+  '没有匹配的模型': 'No matching models',
+  '模型展示列表已保存': 'Model listing saved',
+  '模型展示列表已恢复为默认全部': 'Model listing restored to all models',
   '时间': 'Time',
   '账号': 'Account',
   '协议': 'Protocol',
@@ -1179,6 +1251,7 @@ function setLang(l){
   loadAccounts();
   loadRequestLogs(true);
   if (_('modelsList')) loadModels();
+  if (_modelVisibilityModels.length) renderModelVisibility();
   if (_('settingDefModel')) loadConfig();
   toast(l === 'en' ? 'Language switched to English' : '语言已切换为中文', 'success');
 }
@@ -1229,6 +1302,7 @@ document.querySelectorAll('.nav-item').forEach(el => {
 loadStats(); loadAccounts(); }
     if (el.dataset.tab === 'accounts') loadAccounts();
     if (el.dataset.tab === 'logs') loadRequestLogs(true);
+    if (el.dataset.tab === 'model-visibility') loadModelVisibility();
     if (el.dataset.tab === 'settings') { loadKeys(); loadModels(); loadConfig(); loadOcConfig(); }
   });
 });
@@ -1242,6 +1316,7 @@ function switchTab(name) {
   if (name === 'dashboard') { loadStats(); loadAccounts(); }
   if (name === 'accounts') loadAccounts();
   if (name === 'logs') loadRequestLogs(true);
+  if (name === 'model-visibility') loadModelVisibility();
   if (name === 'settings') { loadKeys(); loadModels(); loadOcConfig(); }
 }
 
@@ -1860,6 +1935,100 @@ async function loadModels() {
   } catch (e) { _('modelsList').textContent = t('加载失败'); }
 }
 
+// ========== /v1/models 展示列表 ==========
+let _modelVisibilityModels = [];
+let _modelVisibilitySelected = new Set();
+let _modelVisibilityConfigured = false;
+
+function updateModelVisibilitySummary() {
+  const selected = _modelVisibilitySelected.size;
+  const total = _modelVisibilityModels.length;
+  _('modelVisibilityCount').textContent = t('已选择 ') + selected + t(' 个，共 ') + total + t(' 个模型');
+  _('modelVisibilityMode').textContent = _modelVisibilityConfigured
+    ? t('自定义展示列表')
+    : t('默认：返回全部模型');
+}
+
+function renderModelVisibility() {
+  const query = (_('modelVisibilitySearch').value || '').trim().toLowerCase();
+  const matched = _modelVisibilityModels
+    .map((model, index) => ({ model, index }))
+    .filter(({ model }) => !query || [model.id, model.provider, model.source, model.cost]
+      .some(value => String(value || '').toLowerCase().includes(query)));
+  _('modelVisibilityList').innerHTML = matched.map(({ model, index }) => {
+    const inputID = 'listedModel-' + index;
+    const meta = [model.provider || '-', model.cost || '-', model.source || 'custom'].join(' · ');
+    return '<label class="model-visibility-option" for="' + inputID + '">' +
+      '<input id="' + inputID + '" name="listedModelIds" type="checkbox" value="' + index + '" ' +
+        (_modelVisibilitySelected.has(model.id) ? 'checked ' : '') +
+        'onchange="toggleListedModel(' + index + ',this.checked)">' +
+      '<span><span class="model-visibility-option-id">' + esc(model.id) + '</span>' +
+      '<span class="model-visibility-option-meta">' + esc(meta) + '</span></span></label>';
+  }).join('') || '<div class="empty">' + t('没有匹配的模型') + '</div>';
+  updateModelVisibilitySummary();
+}
+
+function toggleListedModel(index, checked) {
+  const model = _modelVisibilityModels[index];
+  if (!model) return;
+  if (checked) _modelVisibilitySelected.add(model.id);
+  else _modelVisibilitySelected.delete(model.id);
+  updateModelVisibilitySummary();
+}
+
+function selectAllListedModels() {
+  _modelVisibilitySelected = new Set(_modelVisibilityModels.map(model => model.id));
+  renderModelVisibility();
+}
+
+function clearListedModels() {
+  _modelVisibilitySelected.clear();
+  renderModelVisibility();
+}
+
+async function loadModelVisibility() {
+  try {
+    const response = await api('GET', '/models/visibility');
+    const data = response.data || {};
+    _modelVisibilityModels = data.models || [];
+    _modelVisibilityConfigured = !!data.configured;
+    _modelVisibilitySelected = new Set(_modelVisibilityConfigured
+      ? (data.modelIds || [])
+      : _modelVisibilityModels.map(model => model.id));
+    renderModelVisibility();
+  } catch (e) {
+    _('modelVisibilityList').innerHTML = '<div class="empty">' + t('加载失败') + ': ' + esc(e.message) + '</div>';
+  }
+}
+
+async function saveModelVisibility(event) {
+  event.preventDefault();
+  const button = _('saveModelVisibilityBtn');
+  button.disabled = true;
+  try {
+    const modelIds = _modelVisibilityModels
+      .filter(model => _modelVisibilitySelected.has(model.id))
+      .map(model => model.id);
+    const response = await api('POST', '/models/visibility', { configured: true, modelIds });
+    toast(response.message || t('模型展示列表已保存'), 'success');
+    await loadModelVisibility();
+  } catch (e) {
+    toast(t('保存失败: ') + e.message, 'error');
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function resetModelVisibility() {
+  try {
+    await api('POST', '/models/visibility', { configured: false, modelIds: [] });
+    toast(t('模型展示列表已恢复为默认全部'), 'success');
+    await loadModelVisibility();
+  } catch (e) {
+    toast(t('保存失败: ') + e.message, 'error');
+  }
+}
+
 async function syncModels() {
   const btn = _('syncModelsBtn');
   const orig = btn ? btn.innerHTML : '';
@@ -2093,6 +2262,9 @@ const formatLogDiagnostic = l => {
   if (l.error) parts.push(l.error);
   if (l.errorCode) parts.push('code=' + l.errorCode);
   if (l.finishReason) parts.push('finish=' + l.finishReason);
+  if (l.sawDone) parts.push('terminal_event=true');
+  else if (l.errorCode === 'stream_early_eof') parts.push('terminal_event=false');
+  if (l.retryCount) parts.push('retries=' + l.retryCount);
   if (l.reasoningChars) parts.push('reasoning_chars=' + l.reasoningChars);
   if (l.thinkingTokens) parts.push('thinking_tokens=' + l.thinkingTokens);
   if (l.retrySuppressed) parts.push('retry_suppressed=true');

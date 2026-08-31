@@ -81,6 +81,7 @@ func registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/api/keys/generate", auth(handleAdminGenerateKey))
 	mux.HandleFunc("/admin/api/keys/delete", auth(handleAdminDeleteKey))
 	mux.HandleFunc("/admin/api/models", auth(handleAdminModels))
+	mux.HandleFunc("/admin/api/models/visibility", auth(handleAdminModelVisibility))
 	mux.HandleFunc("/admin/api/models/sync", auth(handleAdminModelSync))
 	mux.HandleFunc("/admin/api/opencode/config", auth(handleOpenCodeConfig))
 	mux.HandleFunc("/admin/api/opencode/config/update", auth(handleOpenCodeConfigUpdate))
@@ -1067,6 +1068,73 @@ func handleAdminModels(w http.ResponseWriter, r *http.Request) {
 		"models":   models,
 		"lastSync": sync,
 	}})
+}
+
+func modelVisibilityData() map[string]any {
+	p := loadPool()
+	poolMu.Lock()
+	configured := p.ModelListConfigured
+	listedModelIDs := append([]string{}, p.ListedModelIDs...)
+	poolMu.Unlock()
+	return map[string]any{
+		"configured": configured,
+		"modelIds":   listedModelIDs,
+		"models":     getAllModels(),
+	}
+}
+
+// GET/POST /admin/api/models/visibility
+func handleAdminModelVisibility(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		writeAPI(w, http.StatusOK, apiResponse{Success: true, Data: modelVisibilityData()})
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
+		return
+	}
+
+	var req struct {
+		Configured bool     `json:"configured"`
+		ModelIDs   []string `json:"modelIds"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_json")})
+		return
+	}
+
+	listedModelIDs := []string{}
+	if req.Configured {
+		requested := make(map[string]struct{}, len(req.ModelIDs))
+		for _, modelID := range req.ModelIDs {
+			requested[modelID] = struct{}{}
+		}
+		for _, model := range getAllModels() {
+			if _, ok := requested[model.ID]; ok {
+				listedModelIDs = append(listedModelIDs, model.ID)
+				delete(requested, model.ID)
+			}
+		}
+		if len(requested) > 0 {
+			for modelID := range requested {
+				writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "unknown_model_id", modelID)})
+				return
+			}
+		}
+	}
+
+	p := loadPool()
+	poolMu.Lock()
+	p.ModelListConfigured = req.Configured
+	p.ListedModelIDs = listedModelIDs
+	poolMu.Unlock()
+	savePool()
+
+	writeAPI(w, http.StatusOK, apiResponse{
+		Success: true,
+		Data:    modelVisibilityData(),
+		Message: tAPI(r, "model_visibility_saved"),
+	})
 }
 
 // POST /admin/api/models/add  body: { id, provider?, cost? }

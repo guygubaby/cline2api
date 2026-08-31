@@ -52,11 +52,13 @@ type ModelStat struct {
 }
 
 type AccountPool struct {
-	Accounts     []*Account `json:"accounts"`
-	CurrentIdx   int        `json:"currentIdx"`
-	Keys         []string   `json:"keys,omitempty"`
-	Models       []Model    `json:"models,omitempty"`
-	DefaultModel string     `json:"defaultModel,omitempty"`
+	Accounts            []*Account `json:"accounts"`
+	CurrentIdx          int        `json:"currentIdx"`
+	Keys                []string   `json:"keys,omitempty"`
+	Models              []Model    `json:"models,omitempty"`
+	DefaultModel        string     `json:"defaultModel,omitempty"`
+	ModelListConfigured bool       `json:"modelListConfigured,omitempty"`
+	ListedModelIDs      []string   `json:"listedModelIds,omitempty"`
 	// 访问设置：监听地址与管理后台密码（后台 UI 保存）
 	ListenHost        string `json:"listenHost,omitempty"`
 	AdminPasswordHash string `json:"adminPasswordHash,omitempty"`

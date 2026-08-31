@@ -30,6 +30,33 @@ func resolvedModelLimits(model Model) (int, int) {
 	return input, output
 }
 
+func filterListedModels(models []Model, configured bool, listedModelIDs []string) []Model {
+	if !configured {
+		return models
+	}
+	listed := make(map[string]struct{}, len(listedModelIDs))
+	for _, modelID := range listedModelIDs {
+		listed[modelID] = struct{}{}
+	}
+	filtered := make([]Model, 0, len(models))
+	for _, model := range models {
+		if _, ok := listed[model.ID]; ok {
+			filtered = append(filtered, model)
+		}
+	}
+	return filtered
+}
+
+func getListedModels() []Model {
+	models := getAllModels()
+	p := loadPool()
+	poolMu.Lock()
+	configured := p.ModelListConfigured
+	listedModelIDs := append([]string(nil), p.ListedModelIDs...)
+	poolMu.Unlock()
+	return filterListedModels(models, configured, listedModelIDs)
+}
+
 func buildModelsResponse(models []Model, anthropic bool) map[string]any {
 	data := make([]any, 0, len(models))
 	for _, model := range models {

@@ -301,7 +301,7 @@ func startProxy(host string, port int) error {
 	}
 
 	modelsHandler := apiKeyHandler(func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, buildModelsResponse(getAllModels(), isAnthropicModelsRequest(r)))
+		writeJSON(w, http.StatusOK, buildModelsResponse(getListedModels(), isAnthropicModelsRequest(r)))
 	})
 	mux.HandleFunc("/v1/models", modelsHandler)
 	mux.HandleFunc("/models", modelsHandler)

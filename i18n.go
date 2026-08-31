@@ -81,6 +81,14 @@ var apiMessages = map[string]map[locale]string{
 		localeZH: "账号不存在",
 		localeEN: "Account not found",
 	},
+	"unknown_model_id": {
+		localeZH: "未知模型：%s",
+		localeEN: "Unknown model: %s",
+	},
+	"model_visibility_saved": {
+		localeZH: "模型展示列表已保存",
+		localeEN: "Model listing saved",
+	},
 	"session_id_required": {
 		localeZH: "必须提供 sessionId",
 		localeEN: "sessionId required",
