@@ -2,7 +2,9 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -33,13 +35,29 @@ func validateResponsesCompatibility(body map[string]any) error {
 	if tools, ok := body["tools"].([]any); ok {
 		for _, tool := range tools {
 			toolMap, _ := tool.(map[string]any)
-			if toolMap == nil || toolMap["type"] != "function" {
+			if toolMap == nil {
 				return fmt.Errorf("only custom function tools can be mapped to the upstream chat API")
+			}
+			switch toolMap["type"] {
+			case "function", "custom":
+			case "web_search", "web_search_preview":
+				// Cline's Chat Completions upstream cannot execute hosted search.
+				// Ignore this optional Codex tool so local function tools remain usable.
+			case "namespace":
+				nestedTools, _ := toolMap["tools"].([]any)
+				for _, nested := range nestedTools {
+					nestedMap, _ := nested.(map[string]any)
+					if nestedMap == nil || nestedMap["type"] != "function" {
+						return fmt.Errorf("only function tools inside a namespace can be mapped to the upstream chat API")
+					}
+				}
+			default:
+				return fmt.Errorf("only function, custom, function namespace, or optional web search tools can be mapped to the upstream chat API")
 			}
 		}
 	}
 	if choice, ok := body["tool_choice"].(map[string]any); ok {
-		if choice["type"] != "function" {
+		if choice["type"] != "function" && choice["type"] != "custom" {
 			return fmt.Errorf("only function tool_choice objects can be mapped to the upstream chat API")
 		}
 	}
@@ -130,15 +148,21 @@ func responsesInputToMessages(input any) []any {
 		msgs = append(msgs, map[string]any{"role": "user", "content": v})
 	case []any:
 		var pendingCalls []any
+		pendingReasoning := ""
 		flushCalls := func() {
 			if len(pendingCalls) == 0 {
 				return
 			}
-			msgs = append(msgs, map[string]any{
+			assistant := map[string]any{
 				"role":       "assistant",
 				"content":    "",
 				"tool_calls": pendingCalls,
-			})
+			}
+			if pendingReasoning != "" {
+				assistant["reasoning_content"] = pendingReasoning
+				pendingReasoning = ""
+			}
+			msgs = append(msgs, assistant)
 			pendingCalls = nil
 		}
 		for _, item := range v {
@@ -153,20 +177,39 @@ func responsesInputToMessages(input any) []any {
 				if role == "" {
 					role = "user"
 				}
-				msgs = append(msgs, map[string]any{"role": role, "content": responsesContentToChat(m["content"])})
-			case "function_call":
+				if role != "assistant" && pendingReasoning != "" {
+					msgs = append(msgs, map[string]any{
+						"role": "assistant", "content": "", "reasoning_content": pendingReasoning,
+					})
+					pendingReasoning = ""
+				}
+				message := map[string]any{"role": role, "content": responsesContentToChat(m["content"])}
+				if role == "assistant" && pendingReasoning != "" {
+					message["reasoning_content"] = pendingReasoning
+					pendingReasoning = ""
+				}
+				msgs = append(msgs, message)
+			case "function_call", "custom_tool_call":
 				callID, _ := m["call_id"].(string)
 				if callID == "" {
 					callID, _ = m["id"].(string)
 				}
 				name, _ := m["name"].(string)
 				args := ""
-				switch a := m["arguments"].(type) {
-				case string:
-					args = a
-				case map[string]any:
-					if b, err := json.Marshal(a); err == nil {
-						args = string(b)
+				if m["type"] == "custom_tool_call" {
+					if input, _ := m["input"].(string); input != "" {
+						if encoded, err := json.Marshal(map[string]any{"input": input}); err == nil {
+							args = string(encoded)
+						}
+					}
+				} else {
+					switch a := m["arguments"].(type) {
+					case string:
+						args = a
+					case map[string]any:
+						if b, err := json.Marshal(a); err == nil {
+							args = string(b)
+						}
 					}
 				}
 				pendingCalls = append(pendingCalls, map[string]any{
@@ -174,7 +217,7 @@ func responsesInputToMessages(input any) []any {
 					"type":     "function",
 					"function": map[string]any{"name": name, "arguments": args},
 				})
-			case "function_call_output":
+			case "function_call_output", "custom_tool_call_output":
 				flushCalls()
 				callID, _ := m["call_id"].(string)
 				if callID == "" {
@@ -198,12 +241,39 @@ func responsesInputToMessages(input any) []any {
 				}
 				msgs = append(msgs, map[string]any{"role": "tool", "content": output, "tool_call_id": callID})
 			case "reasoning":
-				// reasoning 输入项无法映射到 chat 输入，忽略
+				if reasoning := responsesReasoningText(m); reasoning != "" {
+					if pendingReasoning != "" {
+						pendingReasoning += "\n"
+					}
+					pendingReasoning += reasoning
+				}
 			}
 		}
 		flushCalls()
+		if pendingReasoning != "" {
+			msgs = append(msgs, map[string]any{
+				"role": "assistant", "content": "", "reasoning_content": pendingReasoning,
+			})
+		}
 	}
 	return msgs
+}
+
+func responsesReasoningText(item map[string]any) string {
+	for _, field := range []string{"summary", "content"} {
+		var parts []string
+		blocks, _ := item[field].([]any)
+		for _, rawBlock := range blocks {
+			block, _ := rawBlock.(map[string]any)
+			if text, _ := block["text"].(string); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, "\n")
+		}
+	}
+	return ""
 }
 
 func responsesContentToChat(content any) any {
@@ -249,7 +319,7 @@ func responsesToolChoiceToChat(choice any) any {
 	if !ok {
 		return choice
 	}
-	if mapped["type"] == "function" {
+	if mapped["type"] == "function" || mapped["type"] == "custom" {
 		if name, _ := mapped["name"].(string); name != "" {
 			return map[string]any{
 				"type":     "function",
@@ -284,18 +354,26 @@ func responsesFormatToChat(format map[string]any) map[string]any {
 
 // responsesToolsToChat 扁平 function 工具 → OpenAI 嵌套格式。
 func responsesToolsToChat(tools []any) []any {
-	out := make([]any, 0, len(tools))
-	for _, t := range tools {
-		tm, ok := t.(map[string]any)
-		if !ok || tm["type"] != "function" {
-			continue
-		}
+	var out []any
+	seenNames := map[string]bool{}
+	appendFunction := func(tm map[string]any, namespaceDescription string) {
 		fn := map[string]any{}
-		if n, ok := tm["name"].(string); ok {
-			fn["name"] = n
+		name, _ := tm["name"].(string)
+		if name == "" || seenNames[name] {
+			return
 		}
-		if d, ok := tm["description"].(string); ok {
-			fn["description"] = d
+		seenNames[name] = true
+		fn["name"] = name
+		description, _ := tm["description"].(string)
+		if namespaceDescription != "" {
+			if description != "" {
+				description = namespaceDescription + "\n\n" + description
+			} else {
+				description = namespaceDescription
+			}
+		}
+		if description != "" {
+			fn["description"] = description
 		}
 		if p, ok := tm["parameters"].(map[string]any); ok {
 			fn["parameters"] = p
@@ -305,7 +383,103 @@ func responsesToolsToChat(tools []any) []any {
 		}
 		out = append(out, map[string]any{"type": "function", "function": fn})
 	}
+	appendCustom := func(toolMap map[string]any) {
+		name, _ := toolMap["name"].(string)
+		if name == "" || seenNames[name] {
+			return
+		}
+		seenNames[name] = true
+		description, _ := toolMap["description"].(string)
+		const inputInstruction = "Provide freeform tool input in the JSON field named input."
+		if description == "" {
+			description = inputInstruction
+		} else {
+			description += "\n\n" + inputInstruction
+		}
+		function := map[string]any{
+			"name": name,
+			"parameters": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"input": map[string]any{"type": "string"},
+				},
+				"required": []any{"input"},
+			},
+		}
+		if description != "" {
+			function["description"] = description
+		}
+		out = append(out, map[string]any{"type": "function", "function": function})
+	}
+
+	for _, tool := range tools {
+		toolMap, _ := tool.(map[string]any)
+		if toolMap == nil {
+			continue
+		}
+		switch toolMap["type"] {
+		case "function":
+			appendFunction(toolMap, "")
+		case "custom":
+			appendCustom(toolMap)
+		case "namespace":
+			namespaceDescription, _ := toolMap["description"].(string)
+			nestedTools, _ := toolMap["tools"].([]any)
+			for _, nested := range nestedTools {
+				nestedMap, _ := nested.(map[string]any)
+				if nestedMap != nil && nestedMap["type"] == "function" {
+					appendFunction(nestedMap, namespaceDescription)
+				}
+			}
+		}
+	}
 	return out
+}
+
+func responsesCustomToolNames(request map[string]any) map[string]bool {
+	names := map[string]bool{}
+	tools, _ := request["tools"].([]any)
+	for _, rawTool := range tools {
+		tool, _ := rawTool.(map[string]any)
+		if tool == nil {
+			continue
+		}
+		if tool["type"] == "custom" {
+			if name, _ := tool["name"].(string); name != "" {
+				names[name] = true
+			}
+		}
+	}
+	return names
+}
+
+func responsesCustomToolInput(arguments string) string {
+	var decoded map[string]any
+	if json.Unmarshal([]byte(arguments), &decoded) == nil {
+		if input, ok := decoded["input"].(string); ok {
+			return input
+		}
+	}
+	return arguments
+}
+
+func applyResponsesCustomToolOutputs(response, request map[string]any) {
+	customNames := responsesCustomToolNames(request)
+	if len(customNames) == 0 {
+		return
+	}
+	outputs, _ := response["output"].([]any)
+	for _, rawOutput := range outputs {
+		output, _ := rawOutput.(map[string]any)
+		name, _ := output["name"].(string)
+		if output == nil || output["type"] != "function_call" || !customNames[name] {
+			continue
+		}
+		arguments, _ := output["arguments"].(string)
+		delete(output, "arguments")
+		output["type"] = "custom_tool_call"
+		output["input"] = responsesCustomToolInput(arguments)
+	}
 }
 
 // ============ 非流式响应转换 ============
@@ -331,6 +505,9 @@ func chatToResponses(chat map[string]any) map[string]any {
 			var text string
 			if msg != nil {
 				text, _ = msg["content"].(string)
+				if reasoning := reasoningContent(msg); reasoning != "" {
+					outputs = append(outputs, newResponsesReasoningItem(newResponseID("rs_"), reasoning))
+				}
 			}
 			toolCalls, _ := msg["tool_calls"].([]any)
 			if text != "" {
@@ -393,9 +570,20 @@ func chatToResponses(chat map[string]any) map[string]any {
 	return resp
 }
 
+func newResponsesReasoningItem(id, reasoning string) map[string]any {
+	return map[string]any{
+		"id":   id,
+		"type": "reasoning",
+		"summary": []any{
+			map[string]any{"type": "summary_text", "text": reasoning},
+		},
+	}
+}
+
 func chatToResponsesWithRequest(chat, request map[string]any) map[string]any {
 	response := chatToResponses(chat)
 	applyResponsesRequestFields(response, request)
+	applyResponsesCustomToolOutputs(response, request)
 	return response
 }
 
@@ -500,6 +688,118 @@ func newResponsesObject(id, model, status string) map[string]any {
 
 // ============ 流式响应转换（chat SSE → Responses SSE） ============
 
+func responsesChatEventHasProgress(event map[string]any) (bool, error) {
+	event = unwrapDataEnvelope(event)
+	if errorPayload := event["error"]; errorPayload != nil {
+		return false, streamError(errorPayload)
+	}
+	choices, _ := event["choices"].([]any)
+	for _, rawChoice := range choices {
+		choice, _ := rawChoice.(map[string]any)
+		if choice == nil {
+			continue
+		}
+		delta, _ := choice["delta"].(map[string]any)
+		if delta == nil {
+			delta, _ = choice["message"].(map[string]any)
+		}
+		if delta == nil {
+			continue
+		}
+		if strings.TrimSpace(reasoningContent(delta)) != "" {
+			return true, nil
+		}
+		if content, _ := delta["content"].(string); strings.TrimSpace(content) != "" {
+			return true, nil
+		}
+		if calls, _ := delta["tool_calls"].([]any); len(calls) > 0 {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func prepareResponsesChatStream(response *http.Response) (*http.Response, error) {
+	if response == nil || response.Body == nil {
+		return nil, errStreamEarlyEOF
+	}
+	originalBody := response.Body
+	reader := bufio.NewReader(originalBody)
+	var replay bytes.Buffer
+
+	for {
+		line, readErr := reader.ReadString('\n')
+		if line != "" {
+			replay.WriteString(line)
+			trimmed := strings.TrimRight(line, "\r\n")
+			if strings.HasPrefix(trimmed, "data:") {
+				payload := strings.TrimSpace(trimmed[5:])
+				if payload == "[DONE]" {
+					_ = originalBody.Close()
+					return nil, errEmptyResponseContent
+				}
+				if payload != "" {
+					var event map[string]any
+					if err := json.Unmarshal([]byte(payload), &event); err != nil {
+						_ = originalBody.Close()
+						return nil, fmt.Errorf("decode upstream SSE event: %w", err)
+					}
+					progress, err := responsesChatEventHasProgress(event)
+					if err != nil {
+						_ = originalBody.Close()
+						return nil, err
+					}
+					if progress {
+						response.Body = &replayReadCloser{
+							reader: io.MultiReader(bytes.NewReader(replay.Bytes()), reader),
+							closer: originalBody,
+						}
+						return response, nil
+					}
+				}
+			}
+		}
+		if readErr != nil {
+			_ = originalBody.Close()
+			if errors.Is(readErr, io.EOF) {
+				return nil, errStreamEarlyEOF
+			}
+			return nil, fmt.Errorf("read upstream SSE: %w", readErr)
+		}
+	}
+}
+
+func callClineResponsesStream(params map[string]any) (*http.Response, *Account, int, error) {
+	model, _ := params["model"].(string)
+	markRateLimited := func(account *Account, err error) {
+		if account != nil && upstreamErrorStatus(err) == http.StatusTooManyRequests {
+			setModelCooldown(account, model, time.Now().Add(5*time.Minute))
+		}
+	}
+
+	response, account, err := callClineAPI(params, true)
+	if err == nil {
+		response, err = prepareResponsesChatStream(response)
+		markRateLimited(account, err)
+	}
+	if err == nil || !retryableResponsesInitializationError(err) {
+		return response, account, 0, err
+	}
+
+	alternative := pickAlternativeAccountForModel(model, account)
+	if alternative == nil {
+		return nil, account, 0, err
+	}
+	log.Printf("  responses initialization failed (%v); retrying once with another account", err)
+	retryResponse, retryAccount, retryErr := callClineAPIWithAccount(alternative, params, true)
+	if retryErr != nil {
+		return nil, retryAccount, 1, retryErr
+	}
+	retryResponse, retryErr = prepareResponsesChatStream(retryResponse)
+	markRateLimited(retryAccount, retryErr)
+	return retryResponse, retryAccount, 1, retryErr
+}
+
 type responsesSSEWriter struct {
 	w        http.ResponseWriter
 	flusher  http.Flusher
@@ -539,6 +839,7 @@ type responsesToolCallAccumulator struct {
 	name        string
 	arguments   strings.Builder
 	added       bool
+	custom      bool
 }
 
 // chatStreamToResponses 逐行读取上游 chat SSE，转换为完整 Responses 事件生命周期。
@@ -549,14 +850,20 @@ func chatStreamToResponses(w http.ResponseWriter, upstream *http.Response, reqLo
 		s.model = reqLog.Model
 	}
 	initial := newResponsesObject(s.respID, s.model, "in_progress")
+	customToolNames := map[string]bool{}
 	if len(requestParams) > 0 {
 		applyResponsesRequestFields(initial, requestParams[0])
+		customToolNames = responsesCustomToolNames(requestParams[0])
 	}
 	delete(initial, "completed_at")
 	s.event("response.created", map[string]any{"response": initial})
 	s.event("response.in_progress", map[string]any{"response": initial})
 
 	nextOutputIndex := 0
+	reasoningOutputIndex := -1
+	reasoningItemID := ""
+	reasoningEmitted := false
+	var reasoningText strings.Builder
 	textOutputIndex := -1
 	textItemID := ""
 	textEmitted := false
@@ -565,7 +872,9 @@ func chatStreamToResponses(w http.ResponseWriter, upstream *http.Response, reqLo
 	toolOrder := []int{}
 	var latestUsage tokenUsage
 	finishReason := ""
-	streamError := ""
+	var streamFailure error
+	var readFailure error
+	sawDone := false
 	firstOutputAt := time.Time{}
 	startedAt := time.Now()
 	if reqLog != nil {
@@ -591,6 +900,25 @@ func chatStreamToResponses(w http.ResponseWriter, upstream *http.Response, reqLo
 			"part": map[string]any{"type": "output_text", "text": "", "annotations": []any{}},
 		})
 	}
+	ensureReasoningItem := func() {
+		if reasoningEmitted {
+			return
+		}
+		reasoningEmitted = true
+		reasoningOutputIndex = nextOutputIndex
+		nextOutputIndex++
+		reasoningItemID = newResponseID("rs_")
+		s.event("response.output_item.added", map[string]any{
+			"output_index": reasoningOutputIndex,
+			"item": map[string]any{
+				"id": reasoningItemID, "type": "reasoning", "summary": []any{},
+			},
+		})
+		s.event("response.reasoning_summary_part.added", map[string]any{
+			"item_id": reasoningItemID, "output_index": reasoningOutputIndex, "summary_index": 0,
+			"part": map[string]any{"type": "summary_text", "text": ""},
+		})
+	}
 
 	reader := bufio.NewReader(upstream.Body)
 	for {
@@ -599,13 +927,14 @@ func chatStreamToResponses(w http.ResponseWriter, upstream *http.Response, reqLo
 			line = strings.TrimRight(line, "\r\n")
 			if strings.HasPrefix(line, "data:") {
 				payload := strings.TrimSpace(line[5:])
-				if payload != "" && payload != "[DONE]" {
+				if payload == "[DONE]" {
+					sawDone = true
+				} else if payload != "" {
 					var obj map[string]any
 					if json.Unmarshal([]byte(payload), &obj) == nil {
 						obj = unwrapDataEnvelope(obj)
 						if upstreamError := obj["error"]; upstreamError != nil {
-							encoded, _ := json.Marshal(upstreamError)
-							streamError = string(encoded)
+							streamFailure = streamError(upstreamError)
 							break
 						}
 						if m, ok := obj["model"].(string); ok && m != "" {
@@ -624,6 +953,17 @@ func chatStreamToResponses(w http.ResponseWriter, upstream *http.Response, reqLo
 							delta = getNested(obj, "choices", 0)
 						}
 						if d, ok := delta.(map[string]any); ok {
+							if reasoning := reasoningContent(d); reasoning != "" {
+								ensureReasoningItem()
+								reasoningText.WriteString(reasoning)
+								s.event("response.reasoning_summary_text.delta", map[string]any{
+									"item_id": reasoningItemID, "output_index": reasoningOutputIndex,
+									"summary_index": 0, "delta": reasoning,
+								})
+								if firstOutputAt.IsZero() {
+									firstOutputAt = time.Now()
+								}
+							}
 							if content, _ := d["content"].(string); content != "" {
 								ensureTextItem()
 								outText.WriteString(content)
@@ -658,6 +998,7 @@ func chatStreamToResponses(w http.ResponseWriter, upstream *http.Response, reqLo
 									if function != nil {
 										if name, _ := function["name"].(string); name != "" {
 											call.name = name
+											call.custom = customToolNames[name]
 										}
 									}
 									if call.callID == "" {
@@ -665,20 +1006,28 @@ func chatStreamToResponses(w http.ResponseWriter, upstream *http.Response, reqLo
 									}
 									if !call.added && call.name != "" {
 										call.added = true
+										item := map[string]any{
+											"type": "function_call", "id": call.itemID, "call_id": call.callID,
+											"name": call.name, "arguments": "", "status": "in_progress",
+										}
+										if call.custom {
+											delete(item, "arguments")
+											item["type"] = "custom_tool_call"
+											item["input"] = ""
+										}
 										s.event("response.output_item.added", map[string]any{
 											"output_index": call.outputIndex,
-											"item": map[string]any{
-												"type": "function_call", "id": call.itemID, "call_id": call.callID,
-												"name": call.name, "arguments": "", "status": "in_progress",
-											},
+											"item":         item,
 										})
 									}
 									if function != nil {
 										if arguments, _ := function["arguments"].(string); arguments != "" {
 											call.arguments.WriteString(arguments)
-											s.event("response.function_call_arguments.delta", map[string]any{
-												"item_id": call.itemID, "output_index": call.outputIndex, "delta": arguments,
-											})
+											if !call.custom {
+												s.event("response.function_call_arguments.delta", map[string]any{
+													"item_id": call.itemID, "output_index": call.outputIndex, "delta": arguments,
+												})
+											}
 										}
 									}
 								}
@@ -692,67 +1041,123 @@ func chatStreamToResponses(w http.ResponseWriter, upstream *http.Response, reqLo
 			}
 		}
 		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				readFailure = err
+			}
 			break
 		}
 	}
 
-	outputs := make([]any, nextOutputIndex)
-	if textEmitted {
-		text := outText.String()
-		s.event("response.output_text.done", map[string]any{
-			"item_id": textItemID, "output_index": textOutputIndex, "content_index": 0, "text": text,
-		})
-		s.event("response.content_part.done", map[string]any{
-			"item_id": textItemID, "output_index": textOutputIndex, "content_index": 0,
-			"part": map[string]any{"type": "output_text", "text": text, "annotations": []any{}},
-		})
-		item := map[string]any{
-			"id": textItemID, "type": "message", "role": "assistant", "status": "completed",
-			"content": []any{map[string]any{"type": "output_text", "text": text, "annotations": []any{}}},
-		}
-		s.event("response.output_item.done", map[string]any{
-			"output_index": textOutputIndex,
-			"item":         item,
-		})
-		outputs[textOutputIndex] = item
+	if streamFailure == nil && readFailure != nil {
+		streamFailure = fmt.Errorf("read upstream SSE: %w", readFailure)
 	}
-	for _, upstreamIndex := range toolOrder {
-		call := toolCalls[upstreamIndex]
-		if !call.added && call.name != "" {
-			call.added = true
-			s.event("response.output_item.added", map[string]any{
-				"output_index": call.outputIndex,
-				"item": map[string]any{
-					"type": "function_call", "id": call.itemID, "call_id": call.callID,
-					"name": call.name, "arguments": "", "status": "in_progress",
-				},
-			})
-		}
-		arguments := call.arguments.String()
-		s.event("response.function_call_arguments.done", map[string]any{
-			"item_id": call.itemID, "output_index": call.outputIndex, "name": call.name, "arguments": arguments,
-		})
-		item := map[string]any{
-			"type": "function_call", "id": call.itemID, "call_id": call.callID,
-			"name": call.name, "arguments": arguments, "status": "completed",
-		}
-		s.event("response.output_item.done", map[string]any{
-			"output_index": call.outputIndex,
-			"item":         item,
-		})
-		outputs[call.outputIndex] = item
+	if streamFailure == nil && !sawDone && finishReason == "" {
+		streamFailure = errStreamEarlyEOF
 	}
+
 	status := "completed"
 	eventType := "response.completed"
 	completed := true
-	if streamError != "" {
+	if streamFailure != nil {
 		status = "failed"
 		eventType = "response.failed"
 		completed = false
 	} else if finishReason == "length" || finishReason == "content_filter" {
 		status = "incomplete"
 		eventType = "response.incomplete"
+		completed = false
 	}
+	itemStatus := "completed"
+	if status != "completed" {
+		itemStatus = "incomplete"
+	}
+
+	outputs := make([]any, nextOutputIndex)
+	if reasoningEmitted {
+		reasoning := reasoningText.String()
+		item := newResponsesReasoningItem(reasoningItemID, reasoning)
+		outputs[reasoningOutputIndex] = item
+		if status != "failed" {
+			s.event("response.reasoning_summary_text.done", map[string]any{
+				"item_id": reasoningItemID, "output_index": reasoningOutputIndex,
+				"summary_index": 0, "text": reasoning,
+			})
+			s.event("response.reasoning_summary_part.done", map[string]any{
+				"item_id": reasoningItemID, "output_index": reasoningOutputIndex, "summary_index": 0,
+				"part": map[string]any{"type": "summary_text", "text": reasoning},
+			})
+			s.event("response.output_item.done", map[string]any{
+				"output_index": reasoningOutputIndex, "item": item,
+			})
+		}
+	}
+	if textEmitted {
+		text := outText.String()
+		item := map[string]any{
+			"id": textItemID, "type": "message", "role": "assistant", "status": itemStatus,
+			"content": []any{map[string]any{"type": "output_text", "text": text, "annotations": []any{}}},
+		}
+		outputs[textOutputIndex] = item
+		if status != "failed" {
+			s.event("response.output_text.done", map[string]any{
+				"item_id": textItemID, "output_index": textOutputIndex, "content_index": 0, "text": text,
+			})
+			s.event("response.content_part.done", map[string]any{
+				"item_id": textItemID, "output_index": textOutputIndex, "content_index": 0,
+				"part": map[string]any{"type": "output_text", "text": text, "annotations": []any{}},
+			})
+			s.event("response.output_item.done", map[string]any{
+				"output_index": textOutputIndex, "item": item,
+			})
+		}
+	}
+	for _, upstreamIndex := range toolOrder {
+		call := toolCalls[upstreamIndex]
+		if !call.added && call.name != "" {
+			call.added = true
+			addedItem := map[string]any{
+				"type": "function_call", "id": call.itemID, "call_id": call.callID,
+				"name": call.name, "arguments": "", "status": "in_progress",
+			}
+			if call.custom {
+				delete(addedItem, "arguments")
+				addedItem["type"] = "custom_tool_call"
+				addedItem["input"] = ""
+			}
+			s.event("response.output_item.added", map[string]any{
+				"output_index": call.outputIndex,
+				"item":         addedItem,
+			})
+		}
+		arguments := call.arguments.String()
+		item := map[string]any{
+			"type": "function_call", "id": call.itemID, "call_id": call.callID,
+			"name": call.name, "arguments": arguments, "status": itemStatus,
+		}
+		if call.custom {
+			delete(item, "arguments")
+			item["type"] = "custom_tool_call"
+			item["input"] = responsesCustomToolInput(arguments)
+		}
+		outputs[call.outputIndex] = item
+		if status != "failed" {
+			if call.custom {
+				s.event("response.custom_tool_call_input.done", map[string]any{
+					"item_id": call.itemID, "output_index": call.outputIndex,
+					"name": call.name, "input": responsesCustomToolInput(arguments),
+				})
+			} else {
+				s.event("response.function_call_arguments.done", map[string]any{
+					"item_id": call.itemID, "output_index": call.outputIndex,
+					"name": call.name, "arguments": arguments,
+				})
+			}
+			s.event("response.output_item.done", map[string]any{
+				"output_index": call.outputIndex, "item": item,
+			})
+		}
+	}
+
 	response := newResponsesObject(s.respID, s.model, status)
 	if len(requestParams) > 0 {
 		applyResponsesRequestFields(response, requestParams[0])
@@ -761,7 +1166,8 @@ func chatStreamToResponses(w http.ResponseWriter, upstream *http.Response, reqLo
 	response["output_text"] = outText.String()
 	response["usage"] = usageToResponses(latestUsage)
 	if status == "failed" {
-		response["error"] = map[string]any{"code": "upstream_error", "message": streamError}
+		_, _, errorCode := responsesUpstreamErrorDetails(streamFailure)
+		response["error"] = map[string]any{"code": errorCode, "message": streamFailure.Error()}
 		delete(response, "completed_at")
 	} else if status == "incomplete" {
 		reason := "max_output_tokens"
@@ -774,10 +1180,23 @@ func chatStreamToResponses(w http.ResponseWriter, upstream *http.Response, reqLo
 	s.event(eventType, map[string]any{"response": response})
 
 	if reqLog != nil {
+		reqLog.FinishReason = finishReason
+		reqLog.SawDone = sawDone
+		if streamFailure != nil {
+			_, _, reqLog.ErrorCode = responsesUpstreamErrorDetails(streamFailure)
+		} else if status == "incomplete" {
+			reqLog.ErrorCode = response["incomplete_details"].(map[string]any)["reason"].(string)
+		}
 		if acc != nil && latestUsage.Valid {
 			recordTokenUsage(acc, reqLog.Model, latestUsage)
 		}
-		finalizeRequestLog(reqLog, latestUsage, firstOutputAt, startedAt, completed, streamError)
+		errorMessage := ""
+		if streamFailure != nil {
+			errorMessage = streamFailure.Error()
+		} else if status == "incomplete" {
+			errorMessage = "response incomplete: " + reqLog.ErrorCode
+		}
+		finalizeRequestLog(reqLog, latestUsage, firstOutputAt, startedAt, completed, errorMessage)
 	}
 }
 
@@ -806,6 +1225,30 @@ func usageToResponses(u tokenUsage) map[string]any {
 }
 
 // ============ /v1/responses 入口 ============
+
+func writeResponsesUpstreamError(w http.ResponseWriter, reqLog *RequestLog, err error) {
+	status, errorType, errorCode := responsesUpstreamErrorDetails(err)
+	reqLog.ErrorCode = errorCode
+	finalizeRequestLog(reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
+	writeOpenAIError(w, status, errorType, err.Error())
+}
+
+func finalizeResponsesNonStreamLog(reqLog *RequestLog, chat, response map[string]any, usage tokenUsage) {
+	reqLog.FinishReason, _ = getNested(chat, "choices", 0, "finish_reason").(string)
+	status, _ := response["status"].(string)
+	completed := status == "completed"
+	errorMessage := ""
+	if !completed {
+		if details, _ := response["incomplete_details"].(map[string]any); details != nil {
+			reqLog.ErrorCode, _ = details["reason"].(string)
+		}
+		if reqLog.ErrorCode == "" {
+			reqLog.ErrorCode = "response_incomplete"
+		}
+		errorMessage = "response incomplete: " + reqLog.ErrorCode
+	}
+	finalizeRequestLog(reqLog, usage, time.Time{}, reqLog.StartedAt, completed, errorMessage)
+}
 
 func handleResponses(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
@@ -856,21 +1299,27 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 		upResp, err := callZenAPI(chat, isStream)
 		if err != nil {
 			log.Printf("  responses api error: %v", err)
-			finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
-			writeOpenAIError(w, http.StatusBadGateway, "api_error", err.Error())
+			writeResponsesUpstreamError(w, &reqLog, err)
 			return
 		}
-		defer upResp.Body.Close()
 
 		if isStream {
+			prepared, prepareErr := prepareResponsesChatStream(upResp)
+			if prepareErr != nil {
+				log.Printf("  responses zen initialization error: %v", prepareErr)
+				writeResponsesUpstreamError(w, &reqLog, prepareErr)
+				return
+			}
+			defer prepared.Body.Close()
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.Header().Set("Cache-Control", "no-cache")
 			w.Header().Set("Connection", "keep-alive")
 			w.Header().Set("Access-Control-Allow-Origin", "*")
 			w.WriteHeader(http.StatusOK)
-			chatStreamToResponses(w, upResp, &reqLog, nil, params)
+			chatStreamToResponses(w, prepared, &reqLog, nil, params)
 			return
 		}
+		defer upResp.Body.Close()
 		var raw map[string]any
 		if err := json.NewDecoder(upResp.Body).Decode(&raw); err != nil {
 			finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, "decode response: "+err.Error())
@@ -879,8 +1328,9 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 		}
 		out2 := normalizeOpenAIResponse(unwrapDataEnvelope(raw))
 		usage := parseTokenUsage(out2["usage"])
-		finalizeRequestLog(&reqLog, usage, time.Time{}, reqLog.StartedAt, true, "")
-		writeJSON(w, http.StatusOK, chatToResponsesWithRequest(out2, params))
+		result := chatToResponsesWithRequest(out2, params)
+		finalizeResponsesNonStreamLog(&reqLog, out2, result, usage)
+		writeJSON(w, http.StatusOK, result)
 
 	default: // cline
 		if route.Model != "" && route.Model != chatModel {
@@ -891,8 +1341,7 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 			out, acc, err := callClineNonStream(chat)
 			if err != nil {
 				log.Printf("  responses api error: %v", err)
-				finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
-				writeOpenAIError(w, http.StatusBadGateway, "api_error", err.Error())
+				writeResponsesUpstreamError(w, &reqLog, err)
 				return
 			}
 			if acc != nil {
@@ -903,16 +1352,21 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 			if acc != nil {
 				recordTokenUsage(acc, reqLog.Model, usage)
 			}
-			finalizeRequestLog(&reqLog, usage, time.Time{}, reqLog.StartedAt, true, "")
-			writeJSON(w, http.StatusOK, chatToResponsesWithRequest(out, params))
+			result := chatToResponsesWithRequest(out, params)
+			finalizeResponsesNonStreamLog(&reqLog, out, result, usage)
+			writeJSON(w, http.StatusOK, result)
 			return
 		}
 
-		upResp, acc, err := callClineAPI(chat, true)
+		upResp, acc, retryCount, err := callClineResponsesStream(chat)
+		reqLog.RetryCount = retryCount
 		if err != nil {
 			log.Printf("  responses api error: %v", err)
-			finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
-			writeOpenAIError(w, http.StatusBadGateway, "api_error", err.Error())
+			if acc != nil {
+				reqLog.AccountID = acc.AccountID
+				reqLog.AccountEmail = acc.Email
+			}
+			writeResponsesUpstreamError(w, &reqLog, err)
 			return
 		}
 		defer upResp.Body.Close()

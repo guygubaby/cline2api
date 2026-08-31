@@ -102,6 +102,28 @@ Authentication accepts both OpenAI's `Authorization: Bearer <key>` and Anthropic
 
 > The upstream is a Chat Completions service, so features requiring vendor-side state or hosted execution cannot be faithfully emulated. OpenAI `background`, `previous_response_id`, `conversation`, and hosted tools, plus Anthropic server tools, containers, and Skills, return a standard error instead of being silently dropped. For stateless multi-turn Responses calls, send previous output items back in the next `input`.
 
+Responses streaming maps upstream `reasoning_content` to standard reasoning items and reasoning-summary deltas, then restores reasoning history from subsequent input items. Before committing client SSE, the proxy checks stream initialization and retries at most once with another account after a recoverable 429, 5xx, empty stream, or early EOF. Completion requires `[DONE]` or an explicit `finish_reason`; `length` / `content_filter` produce `response.incomplete`, while EOF without a terminal event produces `response.failed`.
+
+Current Codex custom providers use the Responses protocol. The included `codex-models.json` supplies 1M-context, reasoning, shell, and apply_patch metadata for DeepSeek and GLM, avoiding Codex's temporary unknown-model error. Example `~/.codex/config.toml`:
+
+```bash
+curl http://127.0.0.1:3458/codex-models.json -o "$HOME/.codex/cline2api-models.json"
+```
+
+```toml
+model = "deepseek/deepseek-v4-flash"
+model_provider = "cline2api"
+model_catalog_json = "/absolute/path/to/.codex/cline2api-models.json"
+
+[model_providers.cline2api]
+name = "Cline2API"
+base_url = "http://127.0.0.1:3458/v1"
+env_key = "CLINE2API_API_KEY"
+wire_api = "responses"
+```
+
+Codex function, namespace, and custom/apply_patch tools are translated to the Cline Chat upstream. Hosted web search is ignored because Cline cannot execute it. Put the API key in the `CLINE2API_API_KEY` environment variable rather than the config file.
+
 For client-side non-streaming DeepSeek requests, the Cline upstream is called with SSE and then aggregated back into the requested non-streaming protocol. Aggregation preserves visible text, parallel tool calls, reasoning fields, usage, and finish reason. A reasoning-only result retries at most once with another account and is never exposed as the final answer.
 
 Usage metadata follows each protocol's standard fields: OpenAI Chat uses `prompt_tokens` / `completion_tokens` / `total_tokens`; Responses uses `input_tokens` / `output_tokens` plus cache and reasoning details; Anthropic reports fresh input, cache read, cache creation, output, and thinking counters separately. Because the Cline upstream only reports exact usage at the end of a stream, Anthropic `message_start` carries a local input estimate while the final `message_delta` carries the exact breakdown. This preserves real-time TTFT while allowing Claude Code session logs to show context usage.

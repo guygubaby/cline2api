@@ -58,11 +58,7 @@ func numericIndex(value any) int {
 }
 
 func streamError(payload any) error {
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("upstream stream error")
-	}
-	return fmt.Errorf("upstream stream error: %s", truncate(string(encoded), 500))
+	return newUpstreamStreamError(payload)
 }
 
 func aggregateChatCompletionStream(reader io.Reader) (map[string]any, error) {

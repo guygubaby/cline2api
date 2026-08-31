@@ -468,6 +468,7 @@ func startProxy(host string, port int) error {
 	})
 	mux.HandleFunc("/v1/responses", responsesHandler)
 	mux.HandleFunc("/responses", responsesHandler)
+	mux.HandleFunc("/codex-models.json", handleCodexModels)
 
 	if host == "" {
 		host = "127.0.0.1"
@@ -728,7 +729,7 @@ func callClineAPIWithAccount(acc *Account, params map[string]any, stream bool) (
 				savePool()
 			}
 		}
-		return nil, acc, fmt.Errorf("API %d: %s", resp.StatusCode, truncate(bodyStr, 500))
+		return nil, acc, newUpstreamHTTPError(resp.StatusCode, bodyStr)
 	}
 
 	acc.LastUsed = time.Now()
@@ -1133,61 +1134,80 @@ func handleStreamResponse(w http.ResponseWriter, upstream *http.Response, acc *A
 	reader := bufio.NewReader(upstream.Body)
 	var latestUsage tokenUsage
 	var firstOutputAt time.Time
+	finishReason := ""
+	sawDone := false
+	var streamFailure error
 	for {
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			if err == io.EOF {
-				if line != "" {
-					w.Write([]byte(line + "\n"))
-				}
-			}
-			break
-		}
-
-		line = strings.TrimRight(line, "\r\n")
-
-		if strings.HasPrefix(line, "data:") {
-			payload := strings.TrimSpace(line[5:])
-			if payload == "" || payload == "[DONE]" {
-				w.Write([]byte(line + "\n\n"))
-				flusher.Flush()
-				continue
-			}
-
-			// Try to normalize the response
-			var obj map[string]any
-			if err := json.Unmarshal([]byte(payload), &obj); err == nil {
-				// Some Cline responses wrap in {data: {...}}
-				if data, ok := obj["data"]; ok {
-					if d, ok := data.(map[string]any); ok {
-						if _, hasChoices := d["choices"]; hasChoices {
-							obj = d
+		line, readErr := reader.ReadString('\n')
+		if line != "" {
+			line = strings.TrimRight(line, "\r\n")
+			forwarded := false
+			if strings.HasPrefix(line, "data:") {
+				payload := strings.TrimSpace(line[5:])
+				if payload == "[DONE]" {
+					sawDone = true
+					w.Write([]byte(line + "\n\n"))
+					flusher.Flush()
+					forwarded = true
+				} else if payload != "" {
+					var obj map[string]any
+					if err := json.Unmarshal([]byte(payload), &obj); err == nil {
+						obj = unwrapDataEnvelope(obj)
+						if upstreamError := obj["error"]; upstreamError != nil {
+							streamFailure = streamError(upstreamError)
+							break
 						}
-						if _, hasID := d["id"]; hasID {
-							obj = d
+						normalized := normalizeOpenAIResponse(obj)
+						if usage := parseTokenUsage(normalized["usage"]); usage.Valid {
+							latestUsage = mergeTokenUsage(latestUsage, usage)
+						}
+						if reason, _ := getNested(normalized, "choices", 0, "finish_reason").(string); reason != "" {
+							finishReason = reason
+						}
+						if firstOutputAt.IsZero() && hasFirstOutput(normalized) {
+							firstOutputAt = time.Now()
+						}
+						if normalizedBytes, err := json.Marshal(normalized); err == nil {
+							w.Write([]byte("data: " + string(normalizedBytes) + "\n\n"))
+							flusher.Flush()
+							forwarded = true
 						}
 					}
 				}
-				normalized := normalizeOpenAIResponse(obj)
-				if usage := parseTokenUsage(normalized["usage"]); usage.Valid {
-					latestUsage = mergeTokenUsage(latestUsage, usage)
-				}
-				if firstOutputAt.IsZero() && hasFirstOutput(normalized) {
-					firstOutputAt = time.Now()
-				}
-				if normBytes, err := json.Marshal(normalized); err == nil {
-					w.Write([]byte("data: " + string(normBytes) + "\n\n"))
-					flusher.Flush()
-					continue
-				}
+			}
+			if !forwarded {
+				w.Write([]byte(line + "\n"))
+				flusher.Flush()
 			}
 		}
-
-		w.Write([]byte(line + "\n"))
+		if readErr != nil {
+			if !errors.Is(readErr, io.EOF) {
+				streamFailure = fmt.Errorf("read upstream SSE: %w", readErr)
+			}
+			break
+		}
+	}
+	if streamFailure == nil && !sawDone && finishReason == "" {
+		streamFailure = errStreamEarlyEOF
+	}
+	reqLog.FinishReason = finishReason
+	reqLog.SawDone = sawDone
+	completed := streamFailure == nil
+	errorMessage := ""
+	if streamFailure != nil {
+		_, _, errorCode := responsesUpstreamErrorDetails(streamFailure)
+		reqLog.ErrorCode = errorCode
+		errorMessage = streamFailure.Error()
+		payload, _ := json.Marshal(map[string]any{
+			"error": map[string]any{
+				"message": errorMessage, "type": "api_error", "param": nil, "code": errorCode,
+			},
+		})
+		w.Write([]byte("data: " + string(payload) + "\n\n"))
 		flusher.Flush()
 	}
 	recordTokenUsage(acc, reqLog.Model, latestUsage)
-	finalizeRequestLog(reqLog, latestUsage, firstOutputAt, reqLog.StartedAt, true, "")
+	finalizeRequestLog(reqLog, latestUsage, firstOutputAt, reqLog.StartedAt, completed, errorMessage)
 }
 
 func hasFirstOutput(obj map[string]any) bool {

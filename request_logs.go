@@ -41,6 +41,8 @@ type RequestLog struct {
 	Error           string  `json:"error,omitempty"`
 	ErrorCode       string  `json:"errorCode,omitempty"`
 	FinishReason    string  `json:"finishReason,omitempty"`
+	SawDone         bool    `json:"sawDone,omitempty"`
+	RetryCount      int     `json:"retryCount,omitempty"`
 	ReasoningChars  int     `json:"reasoningChars,omitempty"`
 	ThinkingTokens  int64   `json:"thinkingTokens,omitempty"`
 	RetrySuppressed bool    `json:"retrySuppressed,omitempty"`

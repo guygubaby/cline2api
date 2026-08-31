@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -219,6 +220,41 @@ func TestBuildUpstreamBodyPreservesExplicitReasoning(t *testing.T) {
 	}
 	if _, ok := body["thinking"]; ok {
 		t.Fatalf("explicit reasoning request should not be disabled: %#v", body)
+	}
+}
+
+func TestHandleChatStreamMarksEarlyEOFFailed(t *testing.T) {
+	upstream := &http.Response{Body: io.NopCloser(strings.NewReader(
+		"data: {\"model\":\"m1\",\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
+	))}
+	recorder := httptest.NewRecorder()
+	reqLog := &RequestLog{StartedAt: time.Now(), Protocol: "openai", Model: "m1", Stream: true}
+
+	handleStreamResponse(recorder, upstream, nil, reqLog)
+
+	if reqLog.Completed || reqLog.ErrorCode != "stream_early_eof" || reqLog.SawDone {
+		t.Fatalf("early EOF request log = %#v", reqLog)
+	}
+	if !strings.Contains(recorder.Body.String(), `"code":"stream_early_eof"`) {
+		t.Fatalf("client did not receive early EOF error: %s", recorder.Body.String())
+	}
+}
+
+func TestHandleChatStreamRecordsTerminalReason(t *testing.T) {
+	upstreamBody := strings.Join([]string{
+		`data: {"model":"m1","choices":[{"delta":{"content":"done"}}]}`,
+		`data: {"model":"m1","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":1,"total_tokens":5}}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	upstream := &http.Response{Body: io.NopCloser(strings.NewReader(upstreamBody))}
+	recorder := httptest.NewRecorder()
+	reqLog := &RequestLog{StartedAt: time.Now(), Protocol: "openai", Model: "m1", Stream: true}
+
+	handleStreamResponse(recorder, upstream, nil, reqLog)
+
+	if !reqLog.Completed || reqLog.FinishReason != "stop" || !reqLog.SawDone || reqLog.ErrorCode != "" {
+		t.Fatalf("terminal request log = %#v", reqLog)
 	}
 }
 

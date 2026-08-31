@@ -103,6 +103,28 @@ Model:    cline-free/glm-5.2
 
 > 上游实际是 Chat Completions，因此无法可靠模拟需要厂商服务端状态或托管执行环境的功能。OpenAI 的 `background`、`previous_response_id`、`conversation`、托管工具，以及 Anthropic 的服务端工具、容器/Skill 等请求会返回标准错误，不会静默丢弃。Responses 可通过在下一次 `input` 中回传之前的 output items 实现无状态多轮调用。
 
+Responses 流会把上游 `reasoning_content` 转换为标准 reasoning item 与 reasoning summary delta，并在后续 input 中恢复 reasoning history。代理会在提交客户端 SSE 前检查流初始化；遇到可恢复的 429、5xx、空流或提前 EOF 时最多切换一个账号重试一次。只有收到 `[DONE]` 或明确 `finish_reason` 才会标记完成；`length` / `content_filter` 返回 `response.incomplete`，无终止事件的 EOF 返回 `response.failed`。
+
+现代 Codex 自定义 Provider 使用 Responses 协议。仓库内的 `codex-models.json` 提供 DeepSeek 与 GLM 的 1M 上下文、reasoning、shell 和 apply_patch 元数据，可避免 Codex 的 unknown-model 临时错误。示例 `~/.codex/config.toml`：
+
+```bash
+curl http://127.0.0.1:3458/codex-models.json -o "$HOME/.codex/cline2api-models.json"
+```
+
+```toml
+model = "deepseek/deepseek-v4-flash"
+model_provider = "cline2api"
+model_catalog_json = "/absolute/path/to/.codex/cline2api-models.json"
+
+[model_providers.cline2api]
+name = "Cline2API"
+base_url = "http://127.0.0.1:3458/v1"
+env_key = "CLINE2API_API_KEY"
+wire_api = "responses"
+```
+
+Codex 发送的 function、namespace 与 custom/apply_patch 工具会转换到 Cline Chat 上游；Cline 无法执行的 hosted web search 会被忽略。API Key 请放入 `CLINE2API_API_KEY` 环境变量，不要写进配置文件。
+
 DeepSeek 的客户端非流式请求会在 Cline 上游使用 SSE，再聚合为客户端所需的非流式格式。聚合保留正文、并行工具调用、推理字段、usage 与结束原因；若只有推理而没有正文或工具调用，最多换一个账号重试一次，不会把隐藏推理冒充最终答案。
 
 Usage 元数据按各协议的标准字段返回：OpenAI Chat 使用 `prompt_tokens` / `completion_tokens` / `total_tokens`，Responses 使用 `input_tokens` / `output_tokens` 及 cache/reasoning details，Anthropic 使用独立的 input、cache read、cache creation、output 与 thinking counters。由于 Cline 上游只在流结束时给出真实 usage，Anthropic `message_start` 的 input 是本地预估值，最终 `message_delta` 会返回真实明细；这可兼顾 Claude Code session log 的上下文显示与实时 TTFT。
