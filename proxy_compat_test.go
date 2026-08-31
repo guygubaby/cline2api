@@ -38,6 +38,37 @@ func TestBuildUpstreamBodyDisablesThinkingForSmallAuxiliaryCompletion(t *testing
 	}
 }
 
+func TestBuildUpstreamBodyPreservesConvertedIntegerTokenLimits(t *testing.T) {
+	for _, testCase := range []struct {
+		name  string
+		field string
+		value any
+		want  int
+	}{
+		{name: "Anthropic max_tokens", field: "max_tokens", value: 32, want: 32},
+		{name: "Responses max_completion_tokens", field: "max_completion_tokens", value: int64(48), want: 48},
+		{name: "JSON number", field: "max_tokens", value: json.Number("64"), want: 64},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			params := map[string]any{
+				"model":    "deepseek/deepseek-v4-flash",
+				"stream":   false,
+				"messages": []any{map[string]any{"role": "user", "content": "hello"}},
+			}
+			params[testCase.field] = testCase.value
+			body := buildUpstreamBody(params, true)
+
+			if body["max_tokens"] != testCase.want {
+				t.Fatalf("converted token limit = %#v, want %d", body["max_tokens"], testCase.want)
+			}
+			thinking, _ := body["thinking"].(map[string]any)
+			if thinking["type"] != "disabled" {
+				t.Fatalf("integer auxiliary limit did not activate the narrow thinking fallback: %#v", body)
+			}
+		})
+	}
+}
+
 func TestShouldForceClineStreamOnlyForNonStreamingDeepSeek(t *testing.T) {
 	if !shouldForceClineStream(map[string]any{"model": "deepseek/deepseek-v4-flash"}, false) {
 		t.Fatal("non-streaming DeepSeek request should use the upstream stream fallback")

@@ -23,6 +23,21 @@ func TestBuildAnthropicModelsResponseIncludesStandardContextLimits(t *testing.T)
 	}
 }
 
+func TestBuildAnthropicModelsResponseIncludesGLM53FlashLimits(t *testing.T) {
+	response := buildModelsResponse([]Model{{
+		ID: "z-ai/glm-5.3-flash", Provider: "z-ai", Status: "active",
+	}}, true)
+
+	data := response["data"].([]any)
+	if len(data) != 1 {
+		t.Fatalf("models = %d, want 1", len(data))
+	}
+	model := data[0].(map[string]any)
+	if model["max_input_tokens"] != 1_000_000 || model["max_tokens"] != 128_000 {
+		t.Fatalf("GLM-5.3-Flash context limits = %#v", model)
+	}
+}
+
 func TestBuildOpenAIModelsResponseKeepsStandardBasicShape(t *testing.T) {
 	response := buildModelsResponse([]Model{{
 		ID: "deepseek/deepseek-v4-flash", Provider: "deepseek", Status: "active",

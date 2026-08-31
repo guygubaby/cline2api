@@ -548,14 +548,30 @@ func cleanMessages(messages []any) []any {
 	return cleaned
 }
 
+func integerTokenLimit(value any) (int, bool) {
+	switch number := value.(type) {
+	case float64:
+		return int(number), true
+	case int:
+		return number, true
+	case int64:
+		return int(number), true
+	case json.Number:
+		parsed, err := number.Int64()
+		return int(parsed), err == nil
+	default:
+		return 0, false
+	}
+}
+
 func buildUpstreamBody(params map[string]any, stream bool) map[string]any {
 	sessionID := fmt.Sprintf("sess_%d", time.Now().UnixMilli())
 
 	maxTokens := defaultMaxTokens
-	if mt, ok := params["max_tokens"].(float64); ok {
-		maxTokens = int(mt)
-	} else if mt, ok := params["max_completion_tokens"].(float64); ok {
-		maxTokens = int(mt)
+	if value, ok := integerTokenLimit(params["max_tokens"]); ok {
+		maxTokens = value
+	} else if value, ok := integerTokenLimit(params["max_completion_tokens"]); ok {
+		maxTokens = value
 	}
 
 	model := getDefaultModel()
