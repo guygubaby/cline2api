@@ -472,6 +472,7 @@ func startProxy(host string, port int) error {
 		}
 		attachRequestIsolation(params, reqLog.ID, requestTenantScope(r))
 		attachProxyRequestContext(params, r.Context())
+		configurePromptEchoGuard(&reqLog, params)
 		setRequestLogIsolationMetadata(&reqLog, params)
 		if customProviderHasModel(model) {
 			response, provider, retryCount, err := callCustomProviderChat(r.Context(), params, isStream)
@@ -557,6 +558,12 @@ func startProxy(host string, port int) error {
 			}
 			usage := parseTokenUsage(out["usage"])
 			recordTokenUsage(acc, reqLog.Model, usage)
+			if chatResponsePromptEchoed(&reqLog, out) {
+				reqLog.ErrorCode = promptEchoErrorCode
+				finalizeRequestLog(&reqLog, usage, time.Time{}, reqLog.StartedAt, false, errPromptEcho.Error())
+				writeOpenAIErrorCode(w, http.StatusBadGateway, "api_error", promptEchoErrorCode, errPromptEcho.Error())
+				return
+			}
 			finalizeRequestLog(&reqLog, usage, time.Time{}, reqLog.StartedAt, true, "")
 			writeJSON(w, http.StatusOK, normalizeOpenAIChatResponse(out, reqLog.Model, false))
 			return
@@ -709,7 +716,7 @@ func integerTokenLimit(value any) (int, bool) {
 	}
 }
 
-func buildUpstreamBody(params map[string]any, stream bool) map[string]any {
+func buildUpstreamBody(params map[string]any, stream bool, sessionID string) map[string]any {
 	maxTokens := defaultMaxTokens
 	if value, ok := integerTokenLimit(params["max_tokens"]); ok {
 		maxTokens = value
@@ -725,6 +732,9 @@ func buildUpstreamBody(params map[string]any, stream bool) map[string]any {
 	body := map[string]any{
 		"model":      model,
 		"max_tokens": maxTokens,
+	}
+	if sessionID != "" {
+		body["session_id"] = sessionID
 	}
 
 	if msgsRaw, ok := params["messages"]; ok {
@@ -827,10 +837,10 @@ func callClineAPIWithAccount(acc *Account, params map[string]any, stream bool) (
 		return nil, acc, &clineAccountUnavailableError{err: fmt.Errorf("account %s token failed: %w", acc.Email, err)}
 	}
 
-	body := buildUpstreamBody(params, stream)
 	taskID := newUpstreamTaskID()
 	recordUpstreamAttempt(params, taskID)
 	requestID, requestHash := proxyRequestAuditFields(params)
+	body := buildUpstreamBody(params, stream, taskID)
 
 	bodyJSON, err := json.Marshal(body)
 	if err != nil {
@@ -1421,15 +1431,21 @@ func handleStreamResponse(w http.ResponseWriter, upstream *http.Response, acc *A
 					if rawDelta == nil {
 						rawDelta, _ = getNested(obj, "choices", 0, "message").(map[string]any)
 					}
-					if content, _ := rawDelta["content"].(string); visibleRepetition.Observe(content) {
+					content, _ := rawDelta["content"].(string)
+					reasoning := reasoningContent(rawDelta)
+					if requestPromptEchoed(reqLog, reasoning, content) {
+						streamFailure = errPromptEcho
+						break
+					}
+					if visibleRepetition.Observe(content) {
 						streamFailure = errRepetitiveOutput
 						break
 					}
-					if reasoningRepetition.Observe(reasoningContent(rawDelta)) {
+					if reasoningRepetition.Observe(reasoning) {
 						streamFailure = errRepetitiveOutput
 						break
 					}
-					recordRequestLatencyPhases(reqLog, eventAt, reasoningContent(rawDelta) != "", false)
+					recordRequestLatencyPhases(reqLog, eventAt, reasoning != "", false)
 
 					normalized := normalizeOpenAIChatResponse(obj, reqLog.Model, true)
 					if streamID == "" {
@@ -1575,6 +1591,13 @@ func handleNonStreamResponse(w http.ResponseWriter, upstream *http.Response, acc
 
 	out = normalizeOpenAIResponse(out)
 	usage := parseTokenUsage(out["usage"])
+	if chatResponsePromptEchoed(reqLog, out) {
+		recordTokenUsage(acc, reqLog.Model, usage)
+		reqLog.ErrorCode = promptEchoErrorCode
+		finalizeRequestLog(reqLog, usage, time.Time{}, reqLog.StartedAt, false, errPromptEcho.Error())
+		writeOpenAIErrorCode(w, http.StatusBadGateway, "api_error", promptEchoErrorCode, errPromptEcho.Error())
+		return
+	}
 	recordTokenUsage(acc, reqLog.Model, usage)
 	finalizeRequestLog(reqLog, usage, time.Time{}, reqLog.StartedAt, true, "")
 	out = normalizeOpenAIChatResponse(out, reqLog.Model, false)
@@ -2217,6 +2240,12 @@ func handleAnthropicChatResponse(w http.ResponseWriter, response *http.Response,
 	}
 	chatResponse := normalizeOpenAIResponse(unwrapDataEnvelope(raw))
 	usage := parseTokenUsage(chatResponse["usage"])
+	if chatResponsePromptEchoed(reqLog, chatResponse) {
+		reqLog.ErrorCode = promptEchoErrorCode
+		finalizeRequestLog(reqLog, usage, time.Time{}, reqLog.StartedAt, false, errPromptEcho.Error())
+		writeAnthropicError(w, http.StatusBadGateway, "api_error", errPromptEcho.Error())
+		return
+	}
 	finalizeRequestLog(reqLog, usage, time.Time{}, reqLog.StartedAt, true, "")
 	writeJSON(w, http.StatusOK, openAIToAnthropic(chatResponse))
 }
@@ -2252,6 +2281,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	openAIReq := anthropicToOpenAI(req)
 	attachRequestIsolation(openAIReq, reqLog.ID, requestTenantScope(r))
 	attachProxyRequestContext(openAIReq, r.Context())
+	configurePromptEchoGuard(&reqLog, openAIReq)
 	setRequestLogIsolationMetadata(&reqLog, openAIReq)
 	estimatedInputTokens := estimateRawRequestTokens(body)
 	reqLog.EstimatedInputTokens = estimatedInputTokens
@@ -2353,6 +2383,12 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		}
 		usage := parseTokenUsage(out["usage"])
 		recordTokenUsage(acc, reqLog.Model, usage)
+		if chatResponsePromptEchoed(&reqLog, out) {
+			reqLog.ErrorCode = promptEchoErrorCode
+			finalizeRequestLog(&reqLog, usage, time.Time{}, reqLog.StartedAt, false, errPromptEcho.Error())
+			writeAnthropicError(w, http.StatusBadGateway, "api_error", errPromptEcho.Error())
+			return
+		}
 		finalizeRequestLog(&reqLog, usage, time.Time{}, reqLog.StartedAt, true, "")
 		writeJSON(w, http.StatusOK, openAIToAnthropic(out))
 		return
@@ -2694,9 +2730,14 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 		reasoning := reasoningContent(delta)
 		content, _ := delta["content"].(string)
 		toolCalls, _ := delta["tool_calls"].([]any)
-		if visibleRepetition.Observe(content) || reasoningRepetition.Observe(reasoning) {
+		if requestPromptEchoed(reqLog, reasoning, content) {
+			streamFailure = errPromptEcho
+			reqLog.ErrorCode = promptEchoErrorCode
+		} else if visibleRepetition.Observe(content) || reasoningRepetition.Observe(reasoning) {
 			streamFailure = errRepetitiveOutput
 			reqLog.ErrorCode = repetitiveOutputErrorCode
+		}
+		if streamFailure != nil {
 			emit("error", map[string]any{
 				"type":  "error",
 				"error": map[string]any{"type": "api_error", "message": streamFailure.Error()},

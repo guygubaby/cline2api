@@ -53,6 +53,7 @@ type RequestLog struct {
 	ReasoningChars       int     `json:"reasoningChars,omitempty"`
 	ThinkingTokens       int64   `json:"thinkingTokens,omitempty"`
 	RetrySuppressed      bool    `json:"retrySuppressed,omitempty"`
+	promptEchoGuard      *promptEchoGuard
 }
 
 var (
@@ -319,5 +320,6 @@ func finalizeRequestLog(entry *RequestLog, usage tokenUsage, firstOutputAt time.
 		}
 	}
 
+	entry.promptEchoGuard = nil
 	appendRequestLog(*entry)
 }

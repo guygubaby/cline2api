@@ -118,7 +118,7 @@ Chat Completions 对外只返回 OpenAI 标准字段；上游专用的 `reasonin
 
 也可以请求虚拟模型 `free`：代理会依次尝试 `z-ai/glm-5.3-flash`、`deepseek/deepseek-v4-flash`、`cline-free/longcat-2.0`。每个模型最多尝试 2 个未冷却账号，整个请求最多 6 次上游初始化，避免免费池故障时产生无界重试；请求日志记录最终实际模型。
 
-多用户隔离：发往 Cline 的 `X-Task-ID` 使用 128 位安全随机数，且不再发送未公开的 body `session_id`。Zen 压缩状态、客户端缓存键与 user 标识按下游 API Key 的不可逆租户摘要隔离；未配置 API Key 时禁用跨请求共享状态。审计日志只记录随机 request/task ID 和带进程随机密钥的 HMAC-SHA256，不记录提示词或响应正文。不同人员或应用必须使用不同 API Key；账号池仍由实例全局共享，敏感多租户场景还应使用独立实例/账号池。
+多用户隔离：每次发往 Cline 的上游尝试都生成独立的 128 位安全随机会话 ID，并同时用于 `X-Task-ID` 和 body `session_id`；401 原请求重放保持同一 ID，新的尝试绝不复用。Zen 压缩状态、客户端缓存键与 user 标识按下游 API Key 的不可逆租户摘要隔离；未配置 API Key 时禁用跨请求共享状态。审计日志只记录随机 request/task ID 和带进程随机密钥的 HMAC-SHA256，不记录提示词或响应正文。不同人员或应用必须使用不同 API Key；账号池仍由实例全局共享，敏感多租户场景还应使用独立实例/账号池。
 
 现代 Codex 自定义 Provider 使用 Responses 协议。仓库内的 `codex-models.json` 提供 DeepSeek 与 GLM 的 1M 上下文、reasoning、shell 和 apply_patch 元数据，可避免 Codex 的 unknown-model 临时错误。示例 `~/.codex/config.toml`：
 
@@ -145,6 +145,8 @@ DeepSeek 的客户端非流式请求会在 Cline 上游使用 SSE，再聚合为
 Usage 元数据按各协议的标准字段返回：OpenAI Chat 使用 `prompt_tokens` / `completion_tokens` / `total_tokens`，Responses 使用 `input_tokens` / `output_tokens` 及 cache/reasoning details，Anthropic 使用独立的 input、cache read、cache creation、output 与 thinking counters。由于 Cline 上游只在流结束时给出真实 usage，Anthropic `message_start` 的 input 是本地预估值，最终 `message_delta` 会返回真实明细；这可兼顾 Claude Code session log 的上下文显示与实时 TTFT。
 
 Anthropic 流式转换会把 Cline/DeepSeek 的 `reasoning_content` 立即输出为标准 `thinking` block，并在后续工具调用历史中恢复为上游要求的 reasoning。reasoning、正文和工具调用全部为空时，会按策略尝试最多 3 个不同账号，并对返回空结果的“账号 + 模型”短暂冷却。全部失败后，只有估算输入接近模型上下文上限时才返回 `400 invalid_request_error` 并提示 `/compact`；短上下文返回 `529 overloaded_error`、`Retry-After` 和 `upstream_empty_response` 日志错误码，提示稍后重试或切换模型/渠道。相同请求的 SHA-256 指纹仍会短时熔断，避免重试风暴且不保存会话内容。
+
+流式输出还会检测与 SSE 分块无关的周期性复读，以及模型对当前 system prompt 的大段复述；命中后分别以 `repetitive_output` 或 `prompt_echo` 中止流。system prompt 防泄漏检测只在单次请求内使用不可逆片段哈希，正常输出不增加首字缓冲。
 
 `GET /v1/models` 在收到 `anthropic-version` 请求头时返回 Anthropic Models 标准结构，包括 `max_input_tokens` 与 `max_tokens`；OpenAI 请求仍保持其标准的基础 Model 对象，不添加非标准 context 字段。
 

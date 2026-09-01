@@ -28,7 +28,7 @@ func TestBuildUpstreamBodyDisablesThinkingForSmallAuxiliaryCompletion(t *testing
 		"messages": []any{
 			map[string]any{"role": "user", "content": "Return one short title."},
 		},
-	}, true)
+	}, true, "test-session")
 
 	thinking, _ := body["thinking"].(map[string]any)
 	if thinking["type"] != "disabled" {
@@ -57,7 +57,7 @@ func TestBuildUpstreamBodyPreservesConvertedIntegerTokenLimits(t *testing.T) {
 				"messages": []any{map[string]any{"role": "user", "content": "hello"}},
 			}
 			params[testCase.field] = testCase.value
-			body := buildUpstreamBody(params, true)
+			body := buildUpstreamBody(params, true, "test-session")
 
 			if body["max_tokens"] != testCase.want {
 				t.Fatalf("converted token limit = %#v, want %d", body["max_tokens"], testCase.want)
@@ -219,7 +219,7 @@ func TestBuildUpstreamBodyPreservesExplicitReasoning(t *testing.T) {
 		"max_tokens":       float64(64),
 		"reasoning_effort": "high",
 		"messages":         []any{map[string]any{"role": "user", "content": "Think carefully."}},
-	}, false)
+	}, false, "test-session")
 
 	if body["reasoning_effort"] != "high" {
 		t.Fatalf("explicit reasoning_effort was not preserved: %#v", body)

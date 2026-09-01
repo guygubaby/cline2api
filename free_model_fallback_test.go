@@ -95,11 +95,11 @@ func TestCline401RetryReplaysOriginalRequestBody(t *testing.T) {
 	if err := json.Unmarshal(requestBodies[0], &decoded); err != nil {
 		t.Fatalf("decode replayed body: %v", err)
 	}
-	if _, exists := decoded["session_id"]; exists {
-		t.Fatalf("undocumented session_id reached Cline: %#v", decoded)
-	}
 	if len(taskIDs) != 2 || taskIDs[0] == "" || taskIDs[0] != taskIDs[1] {
 		t.Fatalf("401 retry task IDs = %#v, want one stable logical task ID", taskIDs)
+	}
+	if sessionID, _ := decoded["session_id"].(string); sessionID == "" || sessionID != taskIDs[0] {
+		t.Fatalf("Cline session isolation mismatch: body session=%q task IDs=%#v", sessionID, taskIDs)
 	}
 }
 

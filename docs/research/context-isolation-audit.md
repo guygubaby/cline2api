@@ -128,7 +128,7 @@ The incident did not reproduce in this small sample. That does not invalidate th
 The proxy now:
 
 - generates every Cline `X-Task-ID`, proxy request ID, Anthropic message ID, and Responses object ID with at least 128 bits from `crypto/rand`;
-- no longer sends the undocumented body `session_id` to Cline;
+- sends one cryptographically random per-attempt identifier consistently as Cline `X-Task-ID` and body `session_id` (revised by the follow-up finding below);
 - uses a new upstream task ID for each account/model attempt while retaining one proxy request ID for correlation;
 - namespaces Zen compaction state and client-supplied `prompt_cache_key`, `user`, and `safety_identifier` values by a non-reversible API-key tenant scope;
 - disables cross-request shared state when no API key is configured, because no stable tenant boundary exists;
@@ -136,7 +136,7 @@ The proxy now:
 - records the final upstream task ID and actual attempt count in request logs;
 - includes concurrency regressions for 10,000 random task IDs, cross-key compaction state, cache-key namespacing, response-log secrecy, and 401 request replay.
 
-The updated local build accepted Chat Completions, Responses, and Anthropic Messages requests without body `session_id`. A post-fix 16-request concurrent canary produced 15 HTTP 200 responses and one HTTP 502; all 15 successful responses returned only their own canary. The 16 proxy request IDs and 16 final upstream task IDs were unique, including six account retries.
+The first remediation build accepted Chat Completions, Responses, and Anthropic Messages requests without body `session_id`. A post-fix 16-request concurrent canary produced 15 HTTP 200 responses and one HTTP 502; all 15 successful responses returned only their own canary. The 16 proxy request IDs and 16 final upstream task IDs were unique, including six account retries. The later production symptom led to the compatibility revision documented below.
 
 Residual risks remain:
 
@@ -144,6 +144,12 @@ Residual risks remain:
 - all tenants still use credentials from the global Cline account pool, so only Cline/DeepSeek can confirm their account-level cache isolation;
 - the canary did not reproduce the leak and cannot prove an opaque upstream is safe;
 - existing production processes and historical containers keep the old behavior until rebuilt and restarted.
+
+## Follow-up compatibility finding (2026-09-01)
+
+After deployment, a fresh Claude Code request containing only a greeting intermittently received unrelated system-like text. A comparison with `upstream/main` found one isolation-relevant behavioral difference: upstream sends the same per-request identifier in both `X-Task-ID` and body `session_id`, while the first remediation removed the body field. The Cline public schema still does not document `session_id`, so its precise server-side role remains unverified; however, omitting it may make the opaque upstream fall back to account-level/default request state or cache behavior.
+
+The compatibility decision was therefore revised conservatively: the proxy now restores body `session_id`, but never restores the collision-prone timestamp generator. Each logical request gets a cryptographically random 128-bit value shared by `X-Task-ID` and body `session_id`; a transport/auth replay keeps that value, and every new request gets a different one. Integration tests assert header/body agreement, replay stability, uniqueness across requests, and per-request message isolation.
 
 ## Final assessment
 

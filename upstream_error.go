@@ -12,6 +12,7 @@ import (
 var (
 	errStreamEarlyEOF   = errors.New("upstream stream ended before a terminal event")
 	errRepetitiveOutput = errors.New("upstream generated a repetitive output loop; stream terminated")
+	errPromptEcho       = errors.New("upstream echoed protected system instructions; stream terminated")
 )
 
 var embeddedHTTPStatusPattern = regexp.MustCompile(`(?i)status\s+([45][0-9]{2})`)
@@ -134,6 +135,8 @@ func responsesUpstreamErrorDetails(err error) (int, string, string) {
 		return 502, "api_error", "stream_early_eof"
 	case errors.Is(err, errRepetitiveOutput):
 		return 502, "api_error", repetitiveOutputErrorCode
+	case errors.Is(err, errPromptEcho):
+		return 502, "api_error", promptEchoErrorCode
 	case isEmptyResponseError(err):
 		return 502, "api_error", "empty_response_content"
 	default:

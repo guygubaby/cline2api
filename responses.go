@@ -907,6 +907,10 @@ func chatStreamToResponses(w http.ResponseWriter, upstream *http.Response, reqLo
 						}
 						if d, ok := delta.(map[string]any); ok {
 							if reasoning := reasoningContent(d); reasoning != "" {
+								if requestPromptEchoed(reqLog, reasoning) {
+									streamFailure = errPromptEcho
+									break
+								}
 								if reasoningRepetition.Observe(reasoning) {
 									streamFailure = errRepetitiveOutput
 									break
@@ -923,6 +927,10 @@ func chatStreamToResponses(w http.ResponseWriter, upstream *http.Response, reqLo
 								}
 							}
 							if content, _ := d["content"].(string); content != "" {
+								if requestPromptEchoed(reqLog, content) {
+									streamFailure = errPromptEcho
+									break
+								}
 								if visibleRepetition.Observe(content) {
 									streamFailure = errRepetitiveOutput
 									break
@@ -1221,6 +1229,12 @@ func writeResponsesFromChat(w http.ResponseWriter, chat map[string]any, reqLog *
 	if account != nil {
 		recordTokenUsage(account, reqLog.Model, usage)
 	}
+	if chatResponsePromptEchoed(reqLog, chat) {
+		reqLog.ErrorCode = promptEchoErrorCode
+		finalizeRequestLog(reqLog, usage, time.Time{}, reqLog.StartedAt, false, errPromptEcho.Error())
+		writeOpenAIErrorCode(w, http.StatusBadGateway, "api_error", promptEchoErrorCode, errPromptEcho.Error())
+		return
+	}
 	response := chatToResponsesWithRequest(chat, request)
 	finalizeResponsesNonStreamLog(reqLog, chat, response, usage)
 	writeJSON(w, http.StatusOK, response)
@@ -1274,6 +1288,7 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 	chat := responsesToChat(params)
 	attachRequestIsolation(chat, reqLog.ID, requestTenantScope(r))
 	attachProxyRequestContext(chat, r.Context())
+	configurePromptEchoGuard(&reqLog, chat)
 	setRequestLogIsolationMetadata(&reqLog, chat)
 	chatModel, _ := chat["model"].(string)
 	if customProviderHasModel(chatModel) {

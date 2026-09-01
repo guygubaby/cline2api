@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"log"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestUpstreamTaskIDsAreUniqueUnderConcurrency(t *testing.T) {
@@ -37,13 +39,70 @@ func TestUpstreamTaskIDsAreUniqueUnderConcurrency(t *testing.T) {
 	}
 }
 
-func TestUpstreamBodyOmitsUndocumentedSessionID(t *testing.T) {
+func TestUpstreamBodyUsesExplicitIsolatedSessionID(t *testing.T) {
+	sessionID := newUpstreamTaskID()
 	body := buildUpstreamBody(map[string]any{
 		"model":    "deepseek/deepseek-v4-flash",
 		"messages": []any{map[string]any{"role": "user", "content": "private canary"}},
-	}, true)
-	if _, exists := body["session_id"]; exists {
-		t.Fatalf("undocumented session_id leaked upstream: %#v", body)
+	}, true, sessionID)
+	if body["session_id"] != sessionID {
+		t.Fatalf("isolated session ID missing from upstream body: %#v", body)
+	}
+}
+
+func TestClineRequestsKeepSessionsAndMessagesIsolated(t *testing.T) {
+	type capturedRequest struct {
+		taskID string
+		body   map[string]any
+	}
+	oldHTTPClient := httpClient
+	captured := make([]capturedRequest, 0, 32)
+	httpClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		var body map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			return nil, err
+		}
+		captured = append(captured, capturedRequest{taskID: request.Header.Get("X-Task-ID"), body: body})
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"choices":[]}`)),
+			Request:    request,
+		}, nil
+	})}
+	t.Cleanup(func() { httpClient = oldHTTPClient })
+
+	account := &Account{
+		AccountID: "isolated", Email: "isolated@example.com", AccessToken: "workos:isolated",
+		ExpiresAt: time.Now().Add(time.Hour).UnixMilli(), Status: "active", ModelCooldowns: map[string]time.Time{},
+	}
+	for i := 0; i < 32; i++ {
+		canary := "isolated-hi-" + string(rune('A'+i))
+		response, _, err := callClineAPIWithAccount(account, map[string]any{
+			"model":    "deepseek/deepseek-v4-flash",
+			"messages": []any{map[string]any{"role": "user", "content": canary}},
+		}, true)
+		if err != nil {
+			t.Fatalf("request %d: %v", i, err)
+		}
+		response.Body.Close()
+	}
+
+	seenSessions := make(map[string]struct{}, len(captured))
+	for index, request := range captured {
+		sessionID, _ := request.body["session_id"].(string)
+		if sessionID == "" || sessionID != request.taskID {
+			t.Fatalf("request %d session mismatch: body=%q header=%q", index, sessionID, request.taskID)
+		}
+		if _, duplicate := seenSessions[sessionID]; duplicate {
+			t.Fatalf("request %d reused session %q", index, sessionID)
+		}
+		seenSessions[sessionID] = struct{}{}
+		content, _ := getNested(request.body, "messages", 0, "content").(string)
+		want := "isolated-hi-" + string(rune('A'+index))
+		if content != want {
+			t.Fatalf("request %d message contamination: got=%q want=%q", index, content, want)
+		}
 	}
 }
 
