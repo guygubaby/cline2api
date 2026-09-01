@@ -52,12 +52,13 @@ var builtinModels = []Model{
 func getAllModels() []Model {
 	p := loadPool()
 	poolMu.Lock()
-	defer poolMu.Unlock()
+	storedModels := append([]Model(nil), p.Models...)
+	poolMu.Unlock()
 
 	var custom []Model
 	var remote []Model
 	var zen []Model
-	for _, m := range p.Models {
+	for _, m := range storedModels {
 		switch m.Source {
 		case "remote":
 			remote = append(remote, m)
@@ -73,7 +74,7 @@ func getAllModels() []Model {
 		result = append(result, remote...)
 		result = append(result, zen...)
 		result = append(result, custom...)
-		return result
+		return mergeModelCatalogs(result, customProviderCatalogModels())
 	}
 
 	builtin := make([]Model, 0, len(builtinModels)+len(zenSeedModels))
@@ -83,6 +84,36 @@ func getAllModels() []Model {
 	result := make([]Model, 0, len(builtin)+len(custom))
 	result = append(result, builtin...)
 	result = append(result, custom...)
+	return mergeModelCatalogs(result, customProviderCatalogModels())
+}
+
+func mergeModelCatalogs(primary, additional []Model) []Model {
+	result := make([]Model, 0, len(primary)+len(additional))
+	indexByID := make(map[string]int, len(primary)+len(additional))
+	mergeOne := func(model Model) {
+		if index, exists := indexByID[model.ID]; exists {
+			result[index].ChannelCount += model.ChannelCount
+			if model.Source == "custom_provider" && model.ChannelCount > 0 {
+				result[index].Source = model.Source
+				result[index].Provider = model.Provider
+			}
+			if result[index].Context == 0 {
+				result[index].Context = model.Context
+			}
+			if result[index].Output == 0 {
+				result[index].Output = model.Output
+			}
+			return
+		}
+		indexByID[model.ID] = len(result)
+		result = append(result, model)
+	}
+	for _, model := range primary {
+		mergeOne(model)
+	}
+	for _, model := range additional {
+		mergeOne(model)
+	}
 	return result
 }
 
@@ -435,6 +466,28 @@ func startProxy(host string, port int) error {
 		}
 		attachRequestIsolation(params, reqLog.ID, requestTenantScope(r))
 		setRequestLogIsolationMetadata(&reqLog, params)
+		if customProviderHasModel(model) {
+			response, provider, retryCount, err := callCustomProviderChat(r.Context(), params, isStream)
+			reqLog.Upstream = customProviderUpstreamLabel(provider)
+			reqLog.RetryCount = retryCount
+			if err != nil {
+				log.Printf("  custom provider error: %v", err)
+				writeOpenAIUpstreamError(w, &reqLog, err)
+				return
+			}
+			defer response.Body.Close()
+			if isStream {
+				prepared, _, prepareErr := prepareSemanticChatStreamWithTimeout(response, upstreamFirstEventTimeout)
+				if prepareErr != nil {
+					writeOpenAIUpstreamError(w, &reqLog, prepareErr)
+					return
+				}
+				handleStreamResponse(w, prepared, nil, &reqLog, includeUsage)
+			} else {
+				handleNonStreamResponse(w, response, nil, &reqLog)
+			}
+			return
+		}
 
 		// 按 model 自动分流：zen 免费模型 / zen 付费拒绝 / 其余走 Cline 池
 		route := resolveModelRoute(model)
@@ -2100,6 +2153,38 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("  anthropic: model=%s stream=%v msgs=%d history_reasoning_chars=%d",
 		req.Model, req.Stream, len(req.Messages), reasoningHistoryChars(openAIReq))
+	if customProviderHasModel(req.Model) {
+		response, provider, retryCount, callErr := callCustomProviderChat(r.Context(), openAIReq, req.Stream)
+		reqLog.Upstream = customProviderUpstreamLabel(provider)
+		reqLog.RetryCount = retryCount
+		if callErr != nil {
+			log.Printf("  anthropic custom provider error: %v", callErr)
+			writeAnthropicUpstreamError(w, &reqLog, tokenUsage{}, callErr)
+			return
+		}
+		defer response.Body.Close()
+		if req.Stream {
+			prepared, diagnostic, prepareErr := prepareSemanticChatStream(response)
+			if prepareErr != nil {
+				finalizeRequestLog(&reqLog, diagnostic.Usage, time.Time{}, reqLog.StartedAt, false, prepareErr.Error())
+				writeAnthropicError(w, http.StatusBadGateway, "api_error", prepareErr.Error())
+				return
+			}
+			handleAnthropicStream(w, prepared, nil, &reqLog, estimatedInputTokens)
+		} else {
+			var raw map[string]any
+			if err := json.NewDecoder(response.Body).Decode(&raw); err != nil {
+				finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, "decode response: "+err.Error())
+				writeAnthropicError(w, http.StatusBadGateway, "api_error", "decode response: "+err.Error())
+				return
+			}
+			chatResponse := normalizeOpenAIResponse(unwrapDataEnvelope(raw))
+			usage := parseTokenUsage(chatResponse["usage"])
+			finalizeRequestLog(&reqLog, usage, time.Time{}, reqLog.StartedAt, true, "")
+			writeJSON(w, http.StatusOK, openAIToAnthropic(chatResponse))
+		}
+		return
+	}
 
 	// 按 model 自动分流（与 chat 端点一致）：zen 免费/付费拒绝/Cline 池
 	route := resolveModelRoute(req.Model)

@@ -217,6 +217,25 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
 .model-visibility-mode{display:inline-flex;align-items:center;padding:3px 9px;border-radius:10px;background:var(--accent-soft);color:var(--accent);font-size:11px;font-weight:600}
 .warn-box{display:flex;align-items:flex-start;gap:8px;margin-top:10px;padding:10px 12px;border-radius:8px;background:var(--yellow-soft);color:var(--yellow);font-size:13px;line-height:1.5;border:1px solid var(--yellow)}
 
+/* custom providers */
+.provider-layout{display:grid;grid-template-columns:minmax(300px,420px) minmax(0,1fr);gap:20px;align-items:start}
+.provider-grid{display:grid;gap:12px}
+.provider-card{border:1px solid var(--border2);border-radius:12px;background:var(--surface2);overflow:hidden}
+.provider-card-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:14px 16px}
+.provider-card-title{font-weight:600;color:var(--text)}
+.provider-card-meta{margin-top:4px;color:var(--text2);font-size:12px;overflow-wrap:anywhere}
+.provider-card-actions{display:flex;gap:6px;flex-wrap:wrap;padding:0 16px 14px}
+.provider-runtime-error{margin:0 16px 14px;padding:8px 10px;border-radius:8px;background:var(--red-soft);color:var(--red);font-size:12px;overflow-wrap:anywhere}
+.provider-models{border-top:1px solid var(--border2);padding:0 16px 14px}
+.provider-models summary{cursor:pointer;padding:12px 0;color:var(--text2);font-size:13px;font-weight:600}
+.provider-model-row{display:grid;grid-template-columns:28px minmax(120px,1fr) minmax(150px,1.2fr);gap:8px;align-items:center;margin-bottom:8px}
+.provider-model-row input[type="checkbox"]{width:auto;accent-color:var(--accent);justify-self:center}
+.provider-model-id{font-family:ui-monospace,'SF Mono','Cascadia Code','Consolas',monospace;font-size:11px;overflow-wrap:anywhere}
+.provider-model-add{display:grid;grid-template-columns:1fr 1fr auto;gap:8px;margin-top:12px}
+.provider-secret-row{display:flex;gap:8px}
+.provider-secret-row input{flex:1}
+.provider-empty{padding:24px;text-align:center;color:var(--text2);font-size:13px}
+
 /* action row */
 .action-row{display:flex;gap:8px;flex-wrap:wrap}
 
@@ -242,6 +261,10 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
   .section-desc{padding:0 16px 10px}
 	  .section-body,.tab-content{padding:16px}
 	  .model-visibility-list{grid-template-columns:1fr}
+	  .provider-layout{grid-template-columns:1fr}
+	  .provider-model-row{grid-template-columns:28px 1fr}
+	  .provider-model-row input[type="text"]{grid-column:2}
+	  .provider-model-add{grid-template-columns:1fr}
   .tabs{padding:0 12px;overflow-x:auto;white-space:nowrap}
   .tab{padding:11px 12px;font-size:13px}
   .form-row{flex-direction:column;align-items:stretch;gap:0;margin-bottom:0}
@@ -316,6 +339,10 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
     <div class="nav-item" data-tab="model-visibility">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
       <span class="nav-label">模型展示</span>
+    </div>
+    <div class="nav-item" data-tab="providers">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="6" rx="2"/><rect x="3" y="15" width="18" height="6" rx="2"/><path d="M7 6h.01M7 18h.01"/></svg>
+      <span class="nav-label">渠道管理</span>
     </div>
     <div class="nav-item" data-tab="settings">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
@@ -529,7 +556,7 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
     <div class="section-body flush">
       <table class="log-table">
         <thead>
-          <tr><th>时间</th><th>账号</th><th>协议</th><th>模型</th><th>输入</th><th>输出</th><th>缓存</th><th>总</th><th>耗时</th><th>TTFT</th><th>tok/s</th><th>状态</th></tr>
+          <tr><th>时间</th><th>账号 / 渠道</th><th>协议</th><th>模型</th><th>输入</th><th>输出</th><th>缓存</th><th>总</th><th>耗时</th><th>TTFT</th><th>tok/s</th><th>状态</th></tr>
         </thead>
         <tbody id="logTableBody">
           <tr><td colspan="12" class="empty">加载中...</td></tr>
@@ -577,6 +604,93 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
           <button class="btn btn-primary" id="saveModelVisibilityBtn" type="submit">保存展示列表</button>
         </div>
       </form>
+    </div>
+  </div>
+</div>
+
+<div id="tab-providers" class="tab-panel" style="display:none">
+  <div class="page-header">
+    <div>
+      <div class="large-title">第三方渠道</div>
+      <div class="large-subtitle">接入 OpenAI Chat Completions 或 Anthropic Messages 风格的上游</div>
+    </div>
+    <button class="btn btn-sm" type="button" onclick="loadCustomProviders()">刷新</button>
+  </div>
+  <div class="provider-layout">
+    <div>
+      <div class="section">
+        <div class="section-title">渠道配置</div>
+        <div class="section-desc">Base URL 请填写到版本层级，例如 https://api.example.com/v1。API Key 只会写入本地配置文件。</div>
+        <div class="section-body">
+          <form id="providerForm" method="post" action="/admin/api/providers/save" onsubmit="saveCustomProvider(event)">
+            <input id="providerId" name="id" type="hidden">
+            <div class="form-row">
+              <div class="field">
+                <label for="providerName">渠道名称 *</label>
+                <input id="providerName" name="name" type="text" required maxlength="80" autocomplete="off" placeholder="例如 OpenAI 主渠道">
+              </div>
+              <div class="field">
+                <label for="providerEnabled">状态</label>
+                <select id="providerEnabled" name="enabled">
+                  <option value="true">启用</option>
+                  <option value="false">停用</option>
+                </select>
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="field">
+                <label for="providerProtocol">上游协议</label>
+                <select id="providerProtocol" name="protocol">
+                  <option value="openai">OpenAI · Chat Completions</option>
+                  <option value="anthropic">Anthropic · Messages</option>
+                </select>
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="field">
+                <label for="providerBaseURL">Base URL *</label>
+                <input id="providerBaseURL" name="baseURL" type="url" required autocomplete="url" placeholder="https://api.example.com/v1" aria-describedby="providerBaseURLHelp">
+                <div id="providerBaseURLHelp" class="provider-card-meta">系统会请求 /models、/chat/completions 或 /messages。</div>
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="field">
+                <label for="providerApiKey">API Key *</label>
+                <div class="provider-secret-row">
+                  <input id="providerApiKey" name="apiKey" type="password" autocomplete="off" placeholder="编辑时留空表示保持原 Key" aria-describedby="providerApiKeyHelp">
+                  <button class="btn" id="providerApiKeyToggle" type="button" aria-pressed="false" onclick="toggleProviderApiKey()">显示</button>
+                </div>
+                <div id="providerApiKeyHelp" class="provider-card-meta">新渠道必须填写；编辑现有渠道时可留空。</div>
+              </div>
+            </div>
+            <div class="form-actions">
+              <button class="btn btn-primary" id="providerSaveBtn" type="submit">保存渠道</button>
+              <button class="btn" type="button" onclick="resetCustomProviderForm()">清空</button>
+            </div>
+          </form>
+        </div>
+      </div>
+      <div class="section">
+        <div class="section-title">渠道负载均衡</div>
+        <div class="section-desc">同一个公开模型映射到多个启用渠道时，按这里的策略选择。</div>
+        <div class="section-body">
+          <div class="field">
+            <label for="providerStrategy">选择策略</label>
+            <select id="providerStrategy" onchange="saveCustomProviderStrategy()">
+              <option value="round_robin">轮询 (round_robin)</option>
+              <option value="fill">填满 (fill)</option>
+              <option value="random">随机 (random)</option>
+            </select>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="section">
+      <div class="section-title">已配置渠道</div>
+      <div class="section-desc">同步模型后可以启用、停用或修改公开 Model ID；相同公开 ID 会自动组成负载均衡池。</div>
+      <div class="section-body">
+        <div id="providerList" class="provider-grid"><div class="provider-empty">加载中...</div></div>
+      </div>
     </div>
   </div>
 </div>
@@ -869,8 +983,8 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
     <div class="section-body">
       <div style="font-size:13px;color:var(--text2);line-height:1.8">
         <div>• 本程序仅在本地运行，默认监听 <code style="background:var(--surface2);padding:1px 5px;border-radius:3px;font-size:12px">127.0.0.1:3457</code>，不对外暴露。</div>
-        <div>• 账号凭据（refreshToken）存储在可执行文件同目录的 <code style="background:var(--surface2);padding:1px 5px;border-radius:3px;font-size:12px">.cline-accounts.json</code> 中，明文保存，请注意保护。</div>
-        <div>• 所有 API 请求通过本机代理转发至 Cline 官方服务器，不经过任何第三方。</div>
+        <div>• refreshToken 与第三方 API Key 分别保存在本地 <code style="background:var(--surface2);padding:1px 5px;border-radius:3px;font-size:12px">.cline-accounts.json / .cline-providers.json</code> 中，请注意保护。</div>
+        <div>• API 请求会按模型路由到 Cline、opencode 或你配置的第三方渠道。</div>
         <div>• 关闭窗口即停止服务，无后台驻留进程。</div>
       </div>
     </div>
@@ -909,6 +1023,7 @@ const I18N = {
   '导入账号': 'Import',
   '请求日志': 'Request Logs',
   '模型展示': 'Model Listing',
+  '渠道管理': 'Providers',
   '设置': 'Settings',
   '关于': 'About',
   '反馈': 'Feedback',
@@ -977,8 +1092,42 @@ const I18N = {
   '没有匹配的模型': 'No matching models',
   '模型展示列表已保存': 'Model listing saved',
   '模型展示列表已恢复为默认全部': 'Model listing restored to all models',
+  '第三方渠道': 'Custom Providers',
+  '接入 OpenAI Chat Completions 或 Anthropic Messages 风格的上游': 'Connect OpenAI Chat Completions or Anthropic Messages compatible upstreams',
+  '渠道配置': 'Provider Configuration',
+  'Base URL 请填写到版本层级，例如 https://api.example.com/v1。API Key 只会写入本地配置文件。': 'Enter the version-level Base URL, such as https://api.example.com/v1. The API key is stored only in the local config file.',
+  '渠道名称 *': 'Provider Name *',
+  '例如 OpenAI 主渠道': 'e.g. Primary OpenAI',
+  '上游协议': 'Upstream Protocol',
+  '系统会请求 /models、/chat/completions 或 /messages。': 'The proxy calls /models, /chat/completions, or /messages.',
+  '编辑时留空表示保持原 Key': 'Leave empty while editing to keep the current key',
+  '显示': 'Show',
+  '隐藏': 'Hide',
+  '新渠道必须填写；编辑现有渠道时可留空。': 'Required for a new provider; optional while editing.',
+  '保存渠道': 'Save Provider',
+  '清空': 'Clear',
+  '渠道负载均衡': 'Provider Load Balancing',
+  '同一个公开模型映射到多个启用渠道时，按这里的策略选择。': 'When one public model maps to multiple enabled providers, this strategy selects the channel.',
+  '选择策略': 'Selection Strategy',
+  '已配置渠道': 'Configured Providers',
+  '同步模型后可以启用、停用或修改公开 Model ID；相同公开 ID 会自动组成负载均衡池。': 'After syncing, enable, disable, or rename public model IDs. Matching public IDs automatically form a load-balancing pool.',
+  '尚未配置第三方渠道': 'No custom providers configured',
+  '同步模型': 'Sync Models',
+  '编辑': 'Edit',
+  '模型映射': 'Model Mappings',
+  '上游 Model ID': 'Upstream Model ID',
+  '公开 Model ID': 'Public Model ID',
+  '保存模型映射': 'Save Model Mappings',
+  '手动添加上游模型': 'Add an upstream model manually',
+  '渠道已保存': 'Provider saved',
+  '渠道已删除': 'Provider deleted',
+  '渠道模型已同步': 'Provider models synced',
+  '模型映射已保存': 'Model mappings saved',
+  '确定删除此渠道？': 'Delete this provider?',
+  '渠道负载均衡策略已保存': 'Provider load-balancing strategy saved',
   '时间': 'Time',
   '账号': 'Account',
+  '账号 / 渠道': 'Account / Provider',
   '协议': 'Protocol',
   '模型': 'Model',
   '总': 'Total',
@@ -1047,9 +1196,9 @@ const I18N = {
   '数据与隐私': 'Data & Privacy',
   '• 本程序仅在本地运行，默认监听': '• Runs locally, listens on',
   '，不对外暴露。': ', not exposed externally.',
-  '• 账号凭据（refreshToken）存储在可执行文件同目录的': '• Credentials (refreshToken) stored as plaintext in',
-  '中，明文保存，请注意保护。': '; keep them safe.',
-  '• 所有 API 请求通过本机代理转发至 Cline 官方服务器，不经过任何第三方。': '• All API requests are proxied to Cline\'s official servers, never through third parties.',
+  '• refreshToken 与第三方 API Key 分别保存在本地': '• refreshTokens and custom-provider API keys are stored locally in',
+  '中，请注意保护。': '; keep them safe.',
+  '• API 请求会按模型路由到 Cline、opencode 或你配置的第三方渠道。': '• Requests are routed by model to Cline, opencode, or a custom provider you configure.',
   '• 关闭窗口即停止服务，无后台驻留进程。': '• Closing the window stops the service; no background process.',
   'Cline2API 管理后台': 'Cline2API Admin',
   '该后台已启用访问密码，请输入密码登录': 'Password protection is enabled. Enter the password to continue.',
@@ -1149,6 +1298,8 @@ const I18N = {
   '模型无变化': 'No model changes',
   '模型列表已更新': 'Model list updated',
   '同步中...': 'Syncing...',
+  '同步失败: ': 'Sync failed: ',
+  '不能为空': 'is required',
   '暂无模型': 'No models',
   '模型统计': 'Model Usage',
   '按模型统计（仅免费模型）': 'Per-model usage (free models)',
@@ -1203,6 +1354,8 @@ const I18N = {
   'Cline · 免费模型': 'Cline · Free Models',
   'Cline · 付费模型': 'Cline · Paid Models',
   '用户自定义': 'User Custom',
+  '第三方渠道模型': 'Custom Provider Models',
+  ' 个渠道': ' channels',
   '点击展开/折叠': 'Click to expand/collapse',
 };
 let LANG = 'zh';
@@ -1252,6 +1405,7 @@ function setLang(l){
   loadRequestLogs(true);
   if (_('modelsList')) loadModels();
   if (_modelVisibilityModels.length) renderModelVisibility();
+  if (_customProviders.length) renderCustomProviders();
   if (_('settingDefModel')) loadConfig();
   toast(l === 'en' ? 'Language switched to English' : '语言已切换为中文', 'success');
 }
@@ -1303,6 +1457,7 @@ loadStats(); loadAccounts(); }
     if (el.dataset.tab === 'accounts') loadAccounts();
     if (el.dataset.tab === 'logs') loadRequestLogs(true);
     if (el.dataset.tab === 'model-visibility') loadModelVisibility();
+    if (el.dataset.tab === 'providers') loadCustomProviders();
     if (el.dataset.tab === 'settings') { loadKeys(); loadModels(); loadConfig(); loadOcConfig(); }
   });
 });
@@ -1317,6 +1472,7 @@ function switchTab(name) {
   if (name === 'accounts') loadAccounts();
   if (name === 'logs') loadRequestLogs(true);
   if (name === 'model-visibility') loadModelVisibility();
+  if (name === 'providers') loadCustomProviders();
   if (name === 'settings') { loadKeys(); loadModels(); loadOcConfig(); }
 }
 
@@ -1873,6 +2029,7 @@ let _modelSyncSeen = false;
 let _modelGroupOpen = {}; // 模型分组展开状态（跨刷新保持，付费组默认折叠）
 
 function isOcModel(m) { return m.source === 'zen' || m.provider === 'opencode'; }
+function isCustomProviderModel(m) { return m.source === 'custom_provider'; }
 
 function renderModelChip(m) {
   let item = '<span class="model-tag ' + (m.cost || 'free') + '">' + esc(m.id) + '</span>';
@@ -1887,8 +2044,9 @@ function renderModelGroups(models) {
   const groups = [
     { key: 'oc-free', label: 'opencode · 免费模型', filter: m => isOcModel(m) && m.cost === 'free', collapsed: false },
     { key: 'oc-pass', label: 'opencode · 付费模型', filter: m => isOcModel(m) && m.cost !== 'free', collapsed: true },
-    { key: 'cl-free', label: 'Cline · 免费模型', filter: m => !isOcModel(m) && !m.custom && m.cost === 'free', collapsed: false },
-    { key: 'cl-pass', label: 'Cline · 付费模型', filter: m => !isOcModel(m) && !m.custom && m.cost !== 'free', collapsed: true },
+    { key: 'providers', label: '第三方渠道模型', filter: m => isCustomProviderModel(m), collapsed: false },
+    { key: 'cl-free', label: 'Cline · 免费模型', filter: m => !isOcModel(m) && !isCustomProviderModel(m) && !m.custom && m.cost === 'free', collapsed: false },
+    { key: 'cl-pass', label: 'Cline · 付费模型', filter: m => !isOcModel(m) && !isCustomProviderModel(m) && !m.custom && m.cost !== 'free', collapsed: true },
     { key: 'custom', label: '用户自定义', filter: m => m.custom, collapsed: false },
   ];
   return groups.map(g => {
@@ -1957,7 +2115,9 @@ function renderModelVisibility() {
       .some(value => String(value || '').toLowerCase().includes(query)));
   _('modelVisibilityList').innerHTML = matched.map(({ model, index }) => {
     const inputID = 'listedModel-' + index;
-    const meta = [model.provider || '-', model.cost || '-', model.source || 'custom'].join(' · ');
+    const metaParts = [model.provider || '-', model.cost || '-', model.source || 'custom'];
+    if (model.channelCount) metaParts.push(model.channelCount + t(' 个渠道'));
+    const meta = metaParts.join(' · ');
     return '<label class="model-visibility-option" for="' + inputID + '">' +
       '<input id="' + inputID + '" name="listedModelIds" type="checkbox" value="' + index + '" ' +
         (_modelVisibilitySelected.has(model.id) ? 'checked ' : '') +
@@ -2026,6 +2186,212 @@ async function resetModelVisibility() {
     await loadModelVisibility();
   } catch (e) {
     toast(t('保存失败: ') + e.message, 'error');
+  }
+}
+
+// ========== 第三方渠道 ==========
+let _customProviders = [];
+
+function resetCustomProviderForm() {
+  _('providerForm').reset();
+  _('providerId').value = '';
+  _('providerEnabled').value = 'true';
+  _('providerProtocol').value = 'openai';
+  _('providerApiKey').type = 'password';
+  _('providerApiKey').placeholder = t('编辑时留空表示保持原 Key');
+  _('providerApiKeyToggle').textContent = t('显示');
+  _('providerApiKeyToggle').setAttribute('aria-pressed', 'false');
+}
+
+function toggleProviderApiKey() {
+  const input = _('providerApiKey');
+  const showing = input.type === 'text';
+  input.type = showing ? 'password' : 'text';
+  _('providerApiKeyToggle').textContent = t(showing ? '显示' : '隐藏');
+  _('providerApiKeyToggle').setAttribute('aria-pressed', showing ? 'false' : 'true');
+}
+
+function renderCustomProviders() {
+  const list = _('providerList');
+  if (!list) return;
+  if (!_customProviders.length) {
+    list.innerHTML = '<div class="provider-empty">' + t('尚未配置第三方渠道') + '</div>';
+    return;
+  }
+  list.innerHTML = _customProviders.map(provider => {
+    const providerId = esc(provider.id);
+    const models = provider.models || [];
+    const runtime = provider.runtime || {};
+    const protocol = provider.protocol === 'anthropic' ? 'Anthropic · Messages' : 'OpenAI · Chat Completions';
+    const status = provider.enabled
+      ? '<span class="status active"><span class="status-dot active"></span>' + t('启用') + '</span>'
+      : '<span class="status expired"><span class="status-dot expired"></span>' + t('停用') + '</span>';
+    const lastSuccess = runtime.lastSuccess ? new Date(runtime.lastSuccess).toLocaleString(LC()) : '-';
+    const modelRows = models.map((model, index) =>
+      '<div class="provider-model-row" data-index="' + index + '">' +
+        '<input class="provider-model-enabled" type="checkbox" ' + (model.enabled ? 'checked ' : '') +
+          'aria-label="' + esc(t('启用') + ' ' + model.id) + '">' +
+        '<span class="provider-model-id" title="' + esc(model.id) + '">' + esc(model.id) + '</span>' +
+        '<input class="provider-model-public" type="text" value="' + esc(model.publicId || model.id) + '" aria-label="' + esc(t('公开 Model ID')) + '">' +
+      '</div>'
+    ).join('');
+    const modelEditor = '<details class="provider-models" data-provider-models="' + providerId + '">' +
+      '<summary>' + t('模型映射') + ' · ' + models.length + '</summary>' +
+      (modelRows || '<div class="provider-card-meta">' + t('暂无模型') + '</div>') +
+      '<div class="provider-model-add">' +
+        '<input type="text" data-new-upstream placeholder="' + esc(t('上游 Model ID')) + '">' +
+        '<input type="text" data-new-public placeholder="' + esc(t('公开 Model ID')) + '">' +
+        '<button class="btn btn-sm" type="button" onclick="addCustomProviderModel(\'' + providerId + '\')">' + t('添加') + '</button>' +
+      '</div>' +
+      (models.length ? '<div class="form-actions"><button class="btn btn-primary btn-sm" type="button" onclick="saveCustomProviderModels(\'' + providerId + '\')">' + t('保存模型映射') + '</button></div>' : '') +
+    '</details>';
+    return '<article class="provider-card">' +
+      '<div class="provider-card-head">' +
+        '<div><div class="provider-card-title">' + esc(provider.name) + '</div>' +
+          '<div class="provider-card-meta">' + esc(protocol) + ' · ' + esc(provider.baseURL) + '</div>' +
+          '<div class="provider-card-meta">API Key: ' + esc(provider.keyPreview || '-') + ' · ' + t('上次同步') + ': ' + esc(lastSuccess) + '</div></div>' + status +
+      '</div>' +
+      (runtime.lastError ? '<div class="provider-runtime-error">' + esc(runtime.lastError) + '</div>' : '') +
+      '<div class="provider-card-actions">' +
+        '<button class="btn btn-sm" type="button" onclick="editCustomProvider(\'' + providerId + '\')">' + t('编辑') + '</button>' +
+        '<button class="btn btn-sm" type="button" onclick="syncCustomProviderModels(\'' + providerId + '\',this)">' + t('同步模型') + '</button>' +
+        '<button class="btn btn-sm btn-danger" type="button" onclick="removeCustomProvider(\'' + providerId + '\')">' + t('删除') + '</button>' +
+      '</div>' + modelEditor +
+    '</article>';
+  }).join('');
+}
+
+async function loadCustomProviders() {
+  try {
+    const response = await api('GET', '/providers');
+    const data = response.data || {};
+    _customProviders = data.providers || [];
+    _('providerStrategy').value = data.strategy || 'round_robin';
+    renderCustomProviders();
+  } catch (error) {
+    _('providerList').innerHTML = '<div class="provider-empty">' + t('加载失败') + ': ' + esc(error.message) + '</div>';
+  }
+}
+
+function editCustomProvider(providerId) {
+  const provider = _customProviders.find(item => item.id === providerId);
+  if (!provider) return;
+  _('providerId').value = provider.id;
+  _('providerName').value = provider.name || '';
+  _('providerProtocol').value = provider.protocol || 'openai';
+  _('providerBaseURL').value = provider.baseURL || '';
+  _('providerEnabled').value = provider.enabled ? 'true' : 'false';
+  _('providerApiKey').value = '';
+  _('providerApiKey').placeholder = provider.keyPreview || t('编辑时留空表示保持原 Key');
+  _('providerName').focus();
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+async function saveCustomProvider(event) {
+  event.preventDefault();
+  const button = _('providerSaveBtn');
+  button.disabled = true;
+  const payload = {
+    id: _('providerId').value,
+    name: _('providerName').value.trim(),
+    protocol: _('providerProtocol').value,
+    baseURL: _('providerBaseURL').value.trim(),
+    apiKey: _('providerApiKey').value.trim(),
+    enabled: _('providerEnabled').value === 'true',
+  };
+  try {
+    await api('POST', '/providers/save', payload);
+    toast(t('渠道已保存'), 'success');
+    resetCustomProviderForm();
+    await loadCustomProviders();
+  } catch (error) {
+    toast(t('保存失败: ') + error.message, 'error');
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function saveCustomProviderStrategy() {
+  try {
+    await api('POST', '/providers/strategy', { strategy: _('providerStrategy').value });
+    toast(t('渠道负载均衡策略已保存'), 'success');
+  } catch (error) {
+    toast(t('保存失败: ') + error.message, 'error');
+  }
+}
+
+async function syncCustomProviderModels(providerId, button) {
+  const original = button.textContent;
+  button.disabled = true;
+  button.innerHTML = '<span class="loading"></span> ' + t('同步中...');
+  try {
+    await api('POST', '/providers/models/sync', { id: providerId });
+    toast(t('渠道模型已同步'), 'success');
+    await loadCustomProviders();
+  } catch (error) {
+    toast(t('同步失败: ') + error.message, 'error');
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
+}
+
+async function saveCustomProviderModels(providerId) {
+  const provider = _customProviders.find(item => item.id === providerId);
+  const editor = document.querySelector('[data-provider-models="' + providerId + '"]');
+  if (!provider || !editor) return;
+  const rows = Array.from(editor.querySelectorAll('.provider-model-row'));
+  const models = rows.map(row => {
+    const index = Number(row.dataset.index);
+    const original = provider.models[index];
+    return Object.assign({}, original, {
+      enabled: row.querySelector('.provider-model-enabled').checked,
+      publicId: row.querySelector('.provider-model-public').value.trim(),
+    });
+  });
+  if (models.some(model => !model.publicId)) {
+    toast(t('公开 Model ID') + ' ' + t('不能为空'), 'error');
+    return;
+  }
+  try {
+    await api('POST', '/providers/models/update', { id: providerId, models });
+    toast(t('模型映射已保存'), 'success');
+    await loadCustomProviders();
+  } catch (error) {
+    toast(t('保存失败: ') + error.message, 'error');
+  }
+}
+
+async function addCustomProviderModel(providerId) {
+  const provider = _customProviders.find(item => item.id === providerId);
+  const editor = document.querySelector('[data-provider-models="' + providerId + '"]');
+  if (!provider || !editor) return;
+  const upstreamInput = editor.querySelector('[data-new-upstream]');
+  const publicInput = editor.querySelector('[data-new-public]');
+  const upstreamId = upstreamInput.value.trim();
+  const publicId = publicInput.value.trim() || upstreamId;
+  if (!upstreamId) {
+    upstreamInput.focus();
+    return;
+  }
+  const models = (provider.models || []).concat([{ id: upstreamId, publicId, enabled: true }]);
+  try {
+    await api('POST', '/providers/models/update', { id: providerId, models });
+    toast(t('模型映射已保存'), 'success');
+    await loadCustomProviders();
+  } catch (error) {
+    toast(t('保存失败: ') + error.message, 'error');
+  }
+}
+
+async function removeCustomProvider(providerId) {
+  if (!confirm(t('确定删除此渠道？'))) return;
+  try {
+    await api('POST', '/providers/delete', { id: providerId });
+    toast(t('渠道已删除'), 'success');
+    await loadCustomProviders();
+  } catch (error) {
+    toast(t('删除失败: ') + error.message, 'error');
   }
 }
 
@@ -2302,7 +2668,7 @@ async function loadRequestLogs(reset) {
         : '-</td><td>-</td><td>-</td><td>-';
       return '<tr>' +
         '<td class="mono" style="font-size:11px">' + ts + '</td>' +
-        '<td>' + esc(l.accountEmail || '-') + '</td>' +
+        '<td>' + esc(l.accountEmail || l.upstream || '-') + '</td>' +
         '<td>' + esc(l.protocol || '-') + '</td>' +
         '<td class="mono" style="font-size:11px">' + esc(l.model || '-') + '</td>' +
         '<td>' + tk + '</td>' +
@@ -2319,7 +2685,7 @@ async function loadRequestLogs(reset) {
         ? t('输入 ') + formatTokenCount(l.inputTokens) + t(' · 输出 ') + formatTokenCount(l.outputTokens) + t(' · 缓存 ') + formatTokenCount(l.cachedTokens) + t(' · 总 ') + formatTokenCount(l.totalTokens)
         : t('Token 未知');
       return '<article class="account-card">' +
-        '<div class="account-card-header"><span class="account-email">' + esc(l.accountEmail || '-') + '</span><span class="log-status ' + (l.completed ? 'ok' : 'fail') + '" title="' + esc(diagnostic) + '" aria-label="' + esc(st + (diagnostic ? ': ' + diagnostic : '')) + '">' + st + '</span></div>' +
+        '<div class="account-card-header"><span class="account-email">' + esc(l.accountEmail || l.upstream || '-') + '</span><span class="log-status ' + (l.completed ? 'ok' : 'fail') + '" title="' + esc(diagnostic) + '" aria-label="' + esc(st + (diagnostic ? ': ' + diagnostic : '')) + '">' + st + '</span></div>' +
         '<div class="account-metrics">' +
           '<div class="account-metric"><span class="account-metric-label">' + t('协议') + '</span><span class="account-metric-value">' + esc(l.protocol || '-') + '</span></div>' +
           '<div class="account-metric"><span class="account-metric-label">' + t('耗时') + '</span><span class="account-metric-value">' + formatDuration(l.durationMs) + '</span></div>' +

@@ -26,6 +26,7 @@ Cline2API 是 Cline API 的反向代理服务，支持多账号轮询、OpenAI �
 - **多账号轮询**：自动在多个 Cline 账号间切换负载（`round_robin` / `fill` / `random` 策略）
 - **中英文管理后台**：浏览器访问 `/admin/` 管理账号、API Key、模型配置、请求头、代理设置；自动跟随浏览器语言，侧栏可手动切换
 - **动态模型同步**：启动时自动拉取 Cline 官方推荐模型接口（免费/订阅模型），模型变化时弹窗提示，也可在后台手动「从 Cline 同步模型」
+- **第三方渠道管理**：接入 OpenAI Chat Completions 或 Anthropic Messages 兼容上游，同步/映射模型，并在支持同一公开模型的渠道间负载均衡
 - **自定义模型**：后台可手动添加/删除模型 ID，并自由选择默认模型（未设置时自动回退到第一个免费模型）
 - **API Key 鉴权**：保护代理端点，支持生成/删除多个 API Key
 - **System Prompt 覆盖**：项目目录下放 `override.md` 则自动替换系统提示词
@@ -89,6 +90,12 @@ Model:    z-ai/glm-5.3-flash
 ```
 
 兼容 OpenAI 和 Anthropic 两种 API 格式。
+
+### 第三方渠道
+
+管理后台的 **渠道管理** 页面可以添加渠道名称、协议、Base URL 和 API Key。保存后可从上游 `/models` 同步模型，也可以手动添加上游 Model ID，并为每个模型设置公开 Model ID。多个启用渠道映射到同一个公开 Model ID 时，会按轮询、填满或随机策略选择；429、认证失败、网络错误和 5xx 会短暂冷却当前渠道，并在响应尚未开始时最多切换一次其他渠道。
+
+OpenAI 渠道当前使用 `/chat/completions`，Anthropic 渠道使用 `/messages`；两种上游都会被归一化，因此下游仍可使用 Chat Completions、Responses 或 Anthropic Messages。
 
 ### API 协议兼容
 
@@ -222,15 +229,16 @@ git push origin v1.0.0
 | `.cline-accounts.json` | 账号池、API Key、自定义模型与默认模型 |
 | `.cline-request-logs.json` | 请求日志 |
 | `.cline-zen.json` | OpenCode Zen 配置、代理与压缩设置 |
+| `.cline-providers.json` | 第三方渠道、API Key 与模型映射 |
 | `override.md` | System Prompt 覆盖（可选）|
 
-> ⚠️ 账号文件含明文 refreshToken，属于敏感凭据，不要放入发布包或提交到 Git。
+> ⚠️ 账号文件含 refreshToken，第三方渠道文件含 API Key，均属于敏感凭据，不要放入发布包或提交到 Git。
 
 Docker Compose 使用单文件 bind mount 持久化以上状态。首次部署前请确保文件存在：
 
 ```bash
-touch .cline-accounts.json .cline-request-logs.json .cline-zen.json override.md
-chmod 600 .cline-accounts.json .cline-request-logs.json .cline-zen.json
+touch .cline-accounts.json .cline-request-logs.json .cline-zen.json .cline-providers.json override.md
+chmod 600 .cline-accounts.json .cline-request-logs.json .cline-zen.json .cline-providers.json
 ```
 
 程序优先使用临时文件原子替换；若 Docker 单文件挂载拒绝 `rename`，会自动回退为同步写入挂载文件，确保账号、API Key、Zen 配置与请求日志重启后不会回退。

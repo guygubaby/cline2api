@@ -28,12 +28,13 @@ type Account struct {
 }
 
 type Model struct {
-	ID       string `json:"id"`
-	Provider string `json:"provider"`
-	Cost     string `json:"cost"`   // "free" | "pass"
-	Status   string `json:"status"` // "active"
-	Custom   bool   `json:"custom"` // true=用户手动添加，可删除
-	// Source 标记模型来源："remote"=从 Cline 官方接口同步，"zen"=从 opencode 官方接口同步，空=内置/用户自定义
+	ID           string `json:"id"`
+	Provider     string `json:"provider"`
+	Cost         string `json:"cost"`   // "free" | "pass"
+	Status       string `json:"status"` // "active"
+	Custom       bool   `json:"custom"` // true=用户手动添加，可删除
+	ChannelCount int    `json:"channelCount,omitempty"`
+	// Source 标记模型来源："remote"=Cline，"zen"=opencode，"custom_provider"=第三方渠道，空=内置/用户自定义
 	Source string `json:"source,omitempty"`
 	// Context / Output 上下文与最大输出 token（opencode 模型记录；0=未知）
 	Context int `json:"context,omitempty"`

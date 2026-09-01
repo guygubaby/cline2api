@@ -88,6 +88,12 @@ func registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/api/opencode/models/sync", auth(handleOpenCodeModelSync))
 	mux.HandleFunc("/admin/api/models/add", auth(handleAdminModelAdd))
 	mux.HandleFunc("/admin/api/models/delete", auth(handleAdminModelDelete))
+	mux.HandleFunc("/admin/api/providers", auth(handleAdminProviders))
+	mux.HandleFunc("/admin/api/providers/save", auth(handleAdminProviderSave))
+	mux.HandleFunc("/admin/api/providers/delete", auth(handleAdminProviderDelete))
+	mux.HandleFunc("/admin/api/providers/models/sync", auth(handleAdminProviderModelSync))
+	mux.HandleFunc("/admin/api/providers/models/update", auth(handleAdminProviderModelsUpdate))
+	mux.HandleFunc("/admin/api/providers/strategy", auth(handleAdminProviderStrategy))
 	mux.HandleFunc("/admin/api/config", auth(handleAdminConfig))
 	mux.HandleFunc("/admin/api/config/update", auth(handleAdminUpdateConfig))
 	mux.HandleFunc("/admin/api/password", auth(handleAdminPassword))
@@ -1258,6 +1264,116 @@ func handleAdminModelDelete(w http.ResponseWriter, r *http.Request) {
 	savePool()
 
 		writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: tAPI(r, "model_deleted")})
+}
+
+// GET /admin/api/providers
+func handleAdminProviders(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
+		return
+	}
+	writeAPI(w, http.StatusOK, apiResponse{Success: true, Data: customProviderAdminData()})
+}
+
+// POST /admin/api/providers/save
+func handleAdminProviderSave(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
+		return
+	}
+	var provider CustomProvider
+	if err := json.NewDecoder(r.Body).Decode(&provider); err != nil {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_json")})
+		return
+	}
+	saved, err := upsertCustomProvider(provider)
+	if err != nil {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
+		return
+	}
+	writeAPI(w, http.StatusOK, apiResponse{Success: true, Data: map[string]any{"id": saved.ID}, Message: "provider saved"})
+}
+
+// POST /admin/api/providers/delete body: {id}
+func handleAdminProviderDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
+		return
+	}
+	var request struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_json")})
+		return
+	}
+	if err := deleteCustomProvider(request.ID); err != nil {
+		writeAPI(w, http.StatusNotFound, apiResponse{Error: err.Error()})
+		return
+	}
+	writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: "provider deleted"})
+}
+
+// POST /admin/api/providers/models/sync body: {id}
+func handleAdminProviderModelSync(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
+		return
+	}
+	var request struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_json")})
+		return
+	}
+	result, err := syncCustomProviderModels(r.Context(), request.ID)
+	if err != nil {
+		writeAPI(w, http.StatusBadGateway, apiResponse{Error: err.Error()})
+		return
+	}
+	writeAPI(w, http.StatusOK, apiResponse{Success: true, Data: result, Message: "provider models synced"})
+}
+
+// POST /admin/api/providers/models/update body: {id, models}
+func handleAdminProviderModelsUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
+		return
+	}
+	var request struct {
+		ID     string                `json:"id"`
+		Models []CustomProviderModel `json:"models"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_json")})
+		return
+	}
+	if err := updateCustomProviderModels(request.ID, request.Models); err != nil {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
+		return
+	}
+	writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: "provider models updated"})
+}
+
+// POST /admin/api/providers/strategy body: {strategy}
+func handleAdminProviderStrategy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
+		return
+	}
+	var request struct {
+		Strategy string `json:"strategy"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_json")})
+		return
+	}
+	if err := setCustomProviderStrategy(request.Strategy); err != nil {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
+		return
+	}
+	writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: "provider strategy updated"})
 }
 
 // GET /admin/api/stats

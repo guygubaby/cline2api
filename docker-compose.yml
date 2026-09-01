@@ -22,6 +22,11 @@ services:
         bind:
           create_host_path: false
       - type: bind
+        source: ./.cline-providers.json
+        target: /app/.cline-providers.json
+        bind:
+          create_host_path: false
+      - type: bind
         source: ./override.md
         target: /app/override.md
         read_only: true

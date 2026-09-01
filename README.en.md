@@ -26,6 +26,7 @@ Cline2API is a reverse proxy for the Cline API with multi-account rotation, dual
 - **Multi-account rotation**: load-balances across Cline accounts (`round_robin` / `fill` / `random`)
 - **Bilingual admin panel**: `/admin/` manages accounts, API keys, models, headers and proxy settings; auto-follows your browser language, manually switchable in the sidebar
 - **Dynamic model sync**: fetches the official Cline recommended-models API on startup (free / cline-pass / recommended); a popup notifies you when the model list changes, and you can also click "Sync Models from Cline" in the panel anytime
+- **Custom provider management**: connect OpenAI Chat Completions or Anthropic Messages-compatible upstreams, sync/map their models, and load-balance channels that serve the same public model
 - **Custom models**: add/remove model IDs manually and pick a default model (falls back to the first free model automatically)
 - **API key auth**: protects proxy endpoints; generate/delete multiple API keys
 - **System Prompt override**: place an `override.md` next to the executable to replace the system prompt for all requests
@@ -88,6 +89,12 @@ Model:    <model from the synced list, e.g. stealth/ox-alpha>
 ```
 
 Both OpenAI and Anthropic API formats are supported.
+
+### Custom providers
+
+The **Providers** page in the admin panel accepts a provider name, protocol, Base URL, and API key. You can sync models from the upstream `/models` endpoint or add an upstream model ID manually, then assign each one a public model ID. When multiple enabled providers map to the same public model ID, the proxy selects them using round-robin, fill, or random strategy. A channel is briefly cooled after a 429, authentication failure, network error, or 5xx, and the proxy switches to at most one alternate channel before a response begins.
+
+OpenAI providers currently use `/chat/completions`; Anthropic providers use `/messages`. Both are normalized internally, so downstream clients may continue using Chat Completions, Responses, or Anthropic Messages.
 
 ### API protocol compatibility
 
@@ -216,15 +223,16 @@ Files are looked up in this order: executable directory → working directory �
 | `.cline-accounts.json` | Account pool, API keys, custom models and default model |
 | `.cline-request-logs.json` | Request logs |
 | `.cline-zen.json` | OpenCode Zen, proxy, and compaction settings |
+| `.cline-providers.json` | Custom providers, API keys, and model mappings |
 | `override.md` | System Prompt override (optional) |
 
-> ⚠️ The account file contains plaintext refreshTokens — treat it as sensitive. Never ship it in a release package or commit it to Git.
+> ⚠️ The account file contains refreshTokens and the custom-provider file contains API keys. Treat both as sensitive; never ship or commit them.
 
 Docker Compose persists these state files with bind mounts. Ensure they exist before the first deployment:
 
 ```bash
-touch .cline-accounts.json .cline-request-logs.json .cline-zen.json override.md
-chmod 600 .cline-accounts.json .cline-request-logs.json .cline-zen.json
+touch .cline-accounts.json .cline-request-logs.json .cline-zen.json .cline-providers.json override.md
+chmod 600 .cline-accounts.json .cline-request-logs.json .cline-zen.json .cline-providers.json
 ```
 
 The application prefers atomic temp-file replacement. If Docker rejects `rename` over a file bind mount, it automatically falls back to a synced direct write so accounts, API keys, Zen settings, and request logs survive restarts.

@@ -84,6 +84,8 @@ func buildModelsResponse(models []Model, anthropic bool) map[string]any {
 		ownedBy := "cline"
 		if model.Source == "zen" || model.Provider == "opencode" {
 			ownedBy = "opencode"
+		} else if model.Source == "custom_provider" && model.Provider != "" {
+			ownedBy = model.Provider
 		}
 		data = append(data, map[string]any{
 			"id":       model.ID,

@@ -1231,6 +1231,45 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 	attachRequestIsolation(chat, reqLog.ID, requestTenantScope(r))
 	setRequestLogIsolationMetadata(&reqLog, chat)
 	chatModel, _ := chat["model"].(string)
+	if customProviderHasModel(chatModel) {
+		upstreamResponse, provider, retryCount, callErr := callCustomProviderChat(r.Context(), chat, isStream)
+		reqLog.Upstream = customProviderUpstreamLabel(provider)
+		reqLog.RetryCount = retryCount
+		if callErr != nil {
+			log.Printf("  responses custom provider error: %v", callErr)
+			writeOpenAIUpstreamError(w, &reqLog, callErr)
+			return
+		}
+		if isStream {
+			prepared, prepareErr := prepareResponsesChatStream(upstreamResponse)
+			if prepareErr != nil {
+				log.Printf("  responses custom provider initialization error: %v", prepareErr)
+				writeOpenAIUpstreamError(w, &reqLog, prepareErr)
+				return
+			}
+			defer prepared.Body.Close()
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("Connection", "keep-alive")
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.WriteHeader(http.StatusOK)
+			chatStreamToResponses(w, prepared, &reqLog, nil, params)
+			return
+		}
+		defer upstreamResponse.Body.Close()
+		var raw map[string]any
+		if err := json.NewDecoder(upstreamResponse.Body).Decode(&raw); err != nil {
+			finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, "decode response: "+err.Error())
+			writeOpenAIError(w, http.StatusBadGateway, "api_error", "decode response: "+err.Error())
+			return
+		}
+		chatResponse := normalizeOpenAIResponse(unwrapDataEnvelope(raw))
+		usage := parseTokenUsage(chatResponse["usage"])
+		result := chatToResponsesWithRequest(chatResponse, params)
+		finalizeResponsesNonStreamLog(&reqLog, chatResponse, result, usage)
+		writeJSON(w, http.StatusOK, result)
+		return
+	}
 	route := resolveModelRoute(chatModel)
 
 	switch route.Route {
