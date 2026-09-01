@@ -228,11 +228,11 @@ Files are looked up in this order: executable directory → working directory �
 
 > ⚠️ The account file contains refreshTokens and the custom-provider file contains API keys. Treat both as sensitive; never ship or commit them.
 
-Docker Compose persists these state files with bind mounts. Ensure they exist before the first deployment:
+Docker Compose keeps the existing state files as bind mounts and stores custom-provider configuration in an automatically created `provider-data` named volume. Before the first deployment, only the bind-mounted files need to exist:
 
 ```bash
-touch .cline-accounts.json .cline-request-logs.json .cline-zen.json .cline-providers.json override.md
-chmod 600 .cline-accounts.json .cline-request-logs.json .cline-zen.json .cline-providers.json
+touch .cline-accounts.json .cline-request-logs.json .cline-zen.json override.md
+chmod 600 .cline-accounts.json .cline-request-logs.json .cline-zen.json
 ```
 
 The application prefers atomic temp-file replacement. If Docker rejects `rename` over a file bind mount, it automatically falls back to a synced direct write so accounts, API keys, Zen settings, and request logs survive restarts.

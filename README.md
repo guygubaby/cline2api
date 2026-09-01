@@ -234,11 +234,11 @@ git push origin v1.0.0
 
 > ⚠️ 账号文件含 refreshToken，第三方渠道文件含 API Key，均属于敏感凭据，不要放入发布包或提交到 Git。
 
-Docker Compose 使用单文件 bind mount 持久化以上状态。首次部署前请确保文件存在：
+Docker Compose 对已有状态文件使用 bind mount，并用自动创建的 `provider-data` named volume 保存第三方渠道配置。首次部署只需预先创建这些 bind mount 文件：
 
 ```bash
-touch .cline-accounts.json .cline-request-logs.json .cline-zen.json .cline-providers.json override.md
-chmod 600 .cline-accounts.json .cline-request-logs.json .cline-zen.json .cline-providers.json
+touch .cline-accounts.json .cline-request-logs.json .cline-zen.json override.md
+chmod 600 .cline-accounts.json .cline-request-logs.json .cline-zen.json
 ```
 
 程序优先使用临时文件原子替换；若 Docker 单文件挂载拒绝 `rename`，会自动回退为同步写入挂载文件，确保账号、API Key、Zen 配置与请求日志重启后不会回退。

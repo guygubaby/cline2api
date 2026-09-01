@@ -6,11 +6,39 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 )
+
+func TestDockerComposeProviderStorageDoesNotRequirePrecreatedFile(t *testing.T) {
+	compose, err := os.ReadFile("docker-compose.yml")
+	if err != nil {
+		t.Fatalf("read docker-compose.yml: %v", err)
+	}
+	configuration := string(compose)
+	if strings.Contains(configuration, "source: ./.cline-providers.json") {
+		t.Fatal("custom provider storage uses a file bind that fails when the runtime-created file does not exist")
+	}
+	for _, expected := range []string{
+		"target: /app/provider-data",
+		"CLINE_PROVIDERS_PATH=/app/provider-data/.cline-providers.json",
+	} {
+		if !strings.Contains(configuration, expected) {
+			t.Fatalf("docker compose provider storage missing %q", expected)
+		}
+	}
+}
+
+func TestConfiguredCustomProvidersPathUsesEnvironment(t *testing.T) {
+	want := filepath.Join(t.TempDir(), "providers.json")
+	t.Setenv(customProvidersPathEnv, want)
+	if got := configuredCustomProvidersPath(); got != want {
+		t.Fatalf("configured path = %q, want %q", got, want)
+	}
+}
 
 func isolateCustomProviderState(t *testing.T) {
 	t.Helper()

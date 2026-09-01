@@ -21,11 +21,9 @@ services:
         target: /app/.cline-zen.json
         bind:
           create_host_path: false
-      - type: bind
-        source: ./.cline-providers.json
-        target: /app/.cline-providers.json
-        bind:
-          create_host_path: false
+      - type: volume
+        source: provider-data
+        target: /app/provider-data
       - type: bind
         source: ./override.md
         target: /app/override.md
@@ -35,3 +33,7 @@ services:
     environment:
       - PORT=4000
       - CLINE_PROXY_HOST=0.0.0.0
+      - CLINE_PROVIDERS_PATH=/app/provider-data/.cline-providers.json
+
+volumes:
+  provider-data:

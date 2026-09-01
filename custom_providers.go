@@ -24,6 +24,7 @@ const (
 	customProviderProtocolAnthropic = "anthropic"
 	customProviderMaxAttempts       = 2
 	customProviderRequestTimeout    = 15 * time.Second
+	customProvidersPathEnv          = "CLINE_PROVIDERS_PATH"
 )
 
 // CustomProviderModel maps one upstream model to the public model ID exposed
@@ -95,7 +96,14 @@ var (
 )
 
 func init() {
-	customProvidersPath = resolveDataPath(".cline-providers.json")
+	customProvidersPath = configuredCustomProvidersPath()
+}
+
+func configuredCustomProvidersPath() string {
+	if configured := strings.TrimSpace(os.Getenv(customProvidersPathEnv)); configured != "" {
+		return configured
+	}
+	return resolveDataPath(".cline-providers.json")
 }
 
 func defaultCustomProviderStore() *customProviderStoreData {
