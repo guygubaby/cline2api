@@ -33,6 +33,8 @@ services:
     environment:
       - PORT=4000
       - CLINE_PROXY_HOST=0.0.0.0
+      - CLINE_ADMIN_PASSWORD=${CLINE_ADMIN_PASSWORD:-}
+      - CLINE_ALLOW_INSECURE_ADMIN=${CLINE_ALLOW_INSECURE_ADMIN:-false}
       - CLINE_PROVIDERS_PATH=/app/provider-data/.cline-providers.json
 
 volumes:

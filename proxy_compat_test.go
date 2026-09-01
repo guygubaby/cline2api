@@ -255,12 +255,15 @@ func TestHandleChatStreamRecordsTerminalReason(t *testing.T) {
 	}, "\n")
 	upstream := &http.Response{Body: io.NopCloser(strings.NewReader(upstreamBody))}
 	recorder := httptest.NewRecorder()
-	reqLog := &RequestLog{StartedAt: time.Now(), Protocol: "openai", Model: "m1", Stream: true}
+	reqLog := &RequestLog{StartedAt: time.Now().Add(-time.Second), Protocol: "openai", Model: "m1", Stream: true}
 
 	handleStreamResponse(recorder, upstream, nil, reqLog, false)
 
 	if !reqLog.Completed || reqLog.FinishReason != "stop" || !reqLog.SawDone || reqLog.ErrorCode != "" {
 		t.Fatalf("terminal request log = %#v", reqLog)
+	}
+	if reqLog.UpstreamTTFTMs <= 0 || reqLog.VisibleTTFTMs <= 0 || reqLog.ThinkingTTFTMs != 0 {
+		t.Fatalf("chat latency phases = %#v", reqLog)
 	}
 }
 
@@ -388,7 +391,7 @@ func TestValidateChatCompletionRequest(t *testing.T) {
 	}
 }
 
-func TestChatStreamRetriesFirstEventTimeoutAndCoolsDownSlowAccount(t *testing.T) {
+func TestChatStreamStopsAfterFirstEventTimeoutAndCoolsDownSlowAccount(t *testing.T) {
 	firstAccount := &Account{
 		AccountID: "chat-slow", Email: "slow@example.com", AccessToken: "workos:slow",
 		ExpiresAt: time.Now().Add(time.Hour).UnixMilli(), Status: "active", ModelCooldowns: map[string]time.Time{},
@@ -436,11 +439,13 @@ func TestChatStreamRetriesFirstEventTimeoutAndCoolsDownSlowAccount(t *testing.T)
 		"model": model, "stream": true,
 		"messages": []any{map[string]any{"role": "user", "content": "hello"}},
 	}, 20*time.Millisecond)
-	if err != nil {
-		t.Fatalf("retry Chat stream: %v", err)
+	if !errors.Is(err, errUpstreamFirstEventTimeout) {
+		t.Fatalf("Chat timeout = %v", err)
 	}
-	defer response.Body.Close()
-	if requestCount != 2 || account != secondAccount || retryCount != 1 {
+	if response != nil {
+		response.Body.Close()
+	}
+	if requestCount != 1 || account != firstAccount || retryCount != 0 {
 		t.Fatalf("retry result: requests=%d account=%#v retries=%d", requestCount, account, retryCount)
 	}
 	if until := firstAccount.ModelCooldowns[model]; !until.After(time.Now()) {

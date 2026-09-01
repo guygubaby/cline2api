@@ -161,6 +161,9 @@ func TestZenBadRequestDoesNotArmGlobalFailover(t *testing.T) {
 	cfg := getZenConfig()
 	cfg.BaseURL = "https://zen.test/v1"
 	cfg.Retries = 1
+	zenConfigMu.Lock()
+	zenConfig = cloneZenConfig(cfg)
+	zenConfigMu.Unlock()
 
 	zenTransportMu.Lock()
 	oldClient := zenHTTPClient

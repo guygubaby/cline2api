@@ -108,7 +108,10 @@ func upstreamErrorStatus(err error) int {
 }
 
 func retryableStreamInitializationError(err error) bool {
-	if errors.Is(err, errStreamEarlyEOF) || errors.Is(err, errUpstreamFirstEventTimeout) || isEmptyResponseError(err) {
+	if errors.Is(err, errUpstreamFirstEventTimeout) {
+		return false
+	}
+	if errors.Is(err, errStreamEarlyEOF) || isEmptyResponseError(err) {
 		return true
 	}
 	status := upstreamErrorStatus(err)

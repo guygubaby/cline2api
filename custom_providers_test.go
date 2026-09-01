@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestDockerComposeProviderStorageDoesNotRequirePrecreatedFile(t *testing.T) {
@@ -40,6 +42,17 @@ func TestConfiguredCustomProvidersPathUsesEnvironment(t *testing.T) {
 	}
 }
 
+func TestRestrictedProviderDialRejectsPrivateAddresses(t *testing.T) {
+	for _, value := range []string{"127.0.0.1", "10.0.0.1", "169.254.169.254", "::1"} {
+		if !blockedProviderIP(net.ParseIP(value)) {
+			t.Fatalf("private provider address %s was allowed", value)
+		}
+	}
+	if blockedProviderIP(net.ParseIP("8.8.8.8")) {
+		t.Fatal("public provider address was rejected")
+	}
+}
+
 func isolateCustomProviderState(t *testing.T) {
 	t.Helper()
 	customProviderMu.Lock()
@@ -62,6 +75,13 @@ func isolateCustomProviderState(t *testing.T) {
 		customProviderMu.Lock()
 		customProvidersPath = oldPath
 		customProviderStore = oldStore
+		if customProviderStore == nil {
+			customProviderStore = defaultCustomProviderStore()
+		}
+		rebuildCustomProviderIndexLocked()
+		if oldStore == nil {
+			customProviderStore = nil
+		}
 		customProviderHTTPClient = oldHTTPClient
 		customProviderMu.Unlock()
 		customProviderRuntimeMu.Lock()
@@ -207,6 +227,44 @@ func TestCustomProviderCatalogAggregatesChannelsAndMasksKeys(t *testing.T) {
 	}
 	if strings.Contains(string(encoded), "top-secret-1234") || !strings.Contains(string(encoded), "••••1234") {
 		t.Fatalf("API key masking failed: %s", encoded)
+	}
+}
+
+func TestLeastLatencyProviderExploresUnknownThenUsesFastest(t *testing.T) {
+	isolateCustomProviderState(t)
+	slow := addTestCustomProvider(t, CustomProvider{
+		Name: "slow", Protocol: customProviderProtocolOpenAI,
+		BaseURL: "https://slow.example/v1", APIKey: "key", Enabled: true,
+	}, []CustomProviderModel{{ID: "slow-model", PublicID: "shared", Enabled: true}})
+	fast := addTestCustomProvider(t, CustomProvider{
+		Name: "fast", Protocol: customProviderProtocolOpenAI,
+		BaseURL: "https://fast.example/v1", APIKey: "key", Enabled: true,
+	}, []CustomProviderModel{{ID: "fast-model", PublicID: "shared", Enabled: true}})
+	if err := setCustomProviderStrategy("least_latency"); err != nil {
+		t.Fatalf("set strategy: %v", err)
+	}
+
+	customProviderRuntimeMu.Lock()
+	slowState := customProviderStateLocked(slow.ID)
+	slowState.Latencies["slow-model"] = &ModelLatencyStat{EWMAms: 8_000, Samples: 3}
+	customProviderRuntimeMu.Unlock()
+	routes := customProviderRoutesForModel("shared")
+	if len(routes) != 2 || routes[0].Provider.ID != fast.ID {
+		t.Fatalf("unmeasured provider was not explored first: %#v", routes)
+	}
+
+	customProviderRuntimeMu.Lock()
+	fastState := customProviderStateLocked(fast.ID)
+	fastState.Latencies["fast-model"] = &ModelLatencyStat{EWMAms: 1_500, Samples: 2}
+	customProviderRuntimeMu.Unlock()
+	routes = customProviderRoutesForModel("shared")
+	if routes[0].Provider.ID != fast.ID {
+		t.Fatalf("fastest provider was not selected: %#v", routes)
+	}
+
+	coolSlowCustomProviderIfNeeded(slow.ID, "slow-model", "shared", 12*time.Second)
+	if !customProviderModelCooling(slow.ID, "slow-model", time.Now()) {
+		t.Fatal("anomalously slow provider was not cooled")
 	}
 }
 

@@ -28,8 +28,16 @@ func TestHandleAnthropicStreamPreservesFragmentedToolInput(t *testing.T) {
 	if !strings.Contains(body, `"content_block":{"id":"call_1","input":{},"name":"Bash","type":"tool_use"}`) {
 		t.Fatalf("missing Anthropic tool_use block start; SSE body:\n%s", body)
 	}
-	if !strings.Contains(body, `"delta":{"partial_json":"{\"command\":\"pwd\"}","type":"input_json_delta"}`) {
-		t.Fatalf("fragmented tool arguments were not forwarded as input_json_delta; SSE body:\n%s", body)
+	fragments := []string{}
+	for _, event := range decodeSSEEvents(t, body) {
+		delta, _ := event["delta"].(map[string]any)
+		if delta["type"] == "input_json_delta" {
+			fragment, _ := delta["partial_json"].(string)
+			fragments = append(fragments, fragment)
+		}
+	}
+	if strings.Join(fragments, "") != `{"command":"pwd"}` {
+		t.Fatalf("fragmented tool arguments were not forwarded incrementally: %#v", fragments)
 	}
 }
 

@@ -25,6 +25,13 @@ type Account struct {
 	ModelStats map[string]*ModelStat `json:"modelStats,omitempty"`
 	// ModelCooldowns 模型级冷却：modelID → 恢复时间（429 时记录，只暂停该模型）
 	ModelCooldowns map[string]time.Time `json:"modelCooldowns,omitempty"`
+	// ModelLatencies 保存该账号各模型的首个语义事件延迟，用于 least_latency 选择。
+	ModelLatencies map[string]*ModelLatencyStat `json:"modelLatencies,omitempty"`
+}
+
+type ModelLatencyStat struct {
+	EWMAms  float64 `json:"ewmaMs"`
+	Samples int64   `json:"samples"`
 }
 
 type Model struct {
@@ -60,6 +67,8 @@ type AccountPool struct {
 	DefaultModel        string     `json:"defaultModel,omitempty"`
 	ModelListConfigured bool       `json:"modelListConfigured,omitempty"`
 	ListedModelIDs      []string   `json:"listedModelIds,omitempty"`
+	AccountStrategy     string     `json:"accountStrategy,omitempty"`
+	AnthropicEffort     string     `json:"anthropicEffort,omitempty"`
 	// 访问设置：监听地址与管理后台密码（后台 UI 保存）
 	ListenHost        string `json:"listenHost,omitempty"`
 	AdminPasswordHash string `json:"adminPasswordHash,omitempty"`

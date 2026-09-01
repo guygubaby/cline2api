@@ -2,9 +2,11 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -79,6 +81,15 @@ var (
 	remoteZenEnabled   bool
 	remoteZenEnabledMu sync.Mutex
 )
+
+func cloneZenConfig(config *zenConfigData) *zenConfigData {
+	if config == nil {
+		return defaultZenConfig()
+	}
+	clone := *config
+	clone.Proxies = append([]string(nil), config.Proxies...)
+	return &clone
+}
 
 func remoteZenActive() bool {
 	remoteZenEnabledMu.Lock()
@@ -305,7 +316,7 @@ func getZenConfig() *zenConfigData {
 		}
 		zenConfig = cfg
 	}
-	return zenConfig
+	return cloneZenConfig(zenConfig)
 }
 
 // setZenConfig 原子替换配置并持久化，重建信号量与 HTTP 传输层。
@@ -326,11 +337,12 @@ func setZenConfig(c *zenConfigData) {
 	if c.Retries < 0 {
 		c.Retries = 3
 	}
+	stored := cloneZenConfig(c)
 	zenConfigMu.Lock()
-	zenConfig = c
+	zenConfig = stored
 	zenConfigMu.Unlock()
 
-	data, err := json.MarshalIndent(c, "", "  ")
+	data, err := json.MarshalIndent(stored, "", "  ")
 	if err != nil {
 		log.Printf("zen config encode failed: %v", err)
 		return
@@ -557,7 +569,12 @@ func callZenAPI(params map[string]any, stream bool) (*http.Response, error) {
 		sem = zenSem
 	}
 	zenStateMu.Unlock()
-	sem <- struct{}{}
+	ctx := proxyRequestContext(params)
+	select {
+	case sem <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 	defer func() { <-sem }()
 
 	retries := cfg.Retries
@@ -567,7 +584,7 @@ func callZenAPI(params map[string]any, stream bool) (*http.Response, error) {
 	delay := time.Second
 
 	for attempt := 0; ; attempt++ {
-		req, err := http.NewRequest("POST", endpoint, bytes.NewReader(bodyJSON))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyJSON))
 		if err != nil {
 			return nil, fmt.Errorf("create zen request: %w", err)
 		}
@@ -588,10 +605,17 @@ func callZenAPI(params map[string]any, stream bool) (*http.Response, error) {
 
 		resp, err := getZenHTTPClient().Do(req)
 		if err != nil {
+			var networkError net.Error
+			if ctx.Err() != nil || (errors.As(err, &networkError) && networkError.Timeout()) {
+				markZenFail()
+				return nil, fmt.Errorf("zen request: %w", err)
+			}
 			// 网络错误：先退避重试，耗尽后计入故障转移。
 			if attempt < retries {
 				log.Printf("  zen network error (%v), retry %d/%d after %v", err, attempt+1, retries, delay)
-				time.Sleep(withRetryJitter(delay))
+				if err := waitForRetry(ctx, withRetryJitter(delay)); err != nil {
+					return nil, err
+				}
 				delay *= 2
 				continue
 			}
@@ -622,7 +646,9 @@ func callZenAPI(params map[string]any, stream bool) (*http.Response, error) {
 					wait = ra
 				}
 				log.Printf("  zen rate limited (%d), retry %d/%d after %v", resp.StatusCode, attempt+1, retries, wait)
-				time.Sleep(withRetryJitter(wait))
+				if err := waitForRetry(ctx, withRetryJitter(wait)); err != nil {
+					return nil, err
+				}
 				delay *= 2
 				continue
 			}
@@ -639,6 +665,17 @@ func callZenAPI(params map[string]any, stream bool) (*http.Response, error) {
 	}
 }
 
+func waitForRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func bodyParamsModel(params map[string]any) string {
 	m, _ := params["model"].(string)
 	return m
@@ -651,7 +688,7 @@ func readAllLimited(r io.Reader, limit int64) []byte {
 }
 
 func rebuildZenSemLocked() {
-	n := zenConfig.MaxConcurrency
+	n := getZenConfig().MaxConcurrency
 	if n <= 0 {
 		n = 8
 	}

@@ -4,12 +4,64 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 )
 
 var (
-	renameFile       = os.Rename
-	directWritePaths sync.Map
+	renameFile         = os.Rename
+	directWritePaths   sync.Map
+	deferredWritesMu   sync.Mutex
+	deferredWrites     = map[string]deferredWrite{}
+	deferredWriteWake  = make(chan struct{}, 1)
+	deferredWriterOnce sync.Once
 )
+
+const deferredWriteDelay = 250 * time.Millisecond
+
+type deferredWrite struct {
+	data []byte
+	mode os.FileMode
+}
+
+func startDeferredWriter() {
+	deferredWriterOnce.Do(func() {
+		go func() {
+			for range deferredWriteWake {
+				time.Sleep(deferredWriteDelay)
+				flushDeferredWrites()
+			}
+		}()
+	})
+}
+
+func queueDurableWrite(path string, data []byte, mode os.FileMode) {
+	startDeferredWriter()
+	deferredWritesMu.Lock()
+	deferredWrites[path] = deferredWrite{data: append([]byte(nil), data...), mode: mode}
+	deferredWritesMu.Unlock()
+	select {
+	case deferredWriteWake <- struct{}{}:
+	default:
+	}
+}
+
+func flushDeferredWrites() {
+	deferredWritesMu.Lock()
+	writes := deferredWrites
+	deferredWrites = map[string]deferredWrite{}
+	deferredWritesMu.Unlock()
+	for path, write := range writes {
+		if err := writeFileDurably(path, write.data, write.mode); err != nil {
+			fmt.Printf("deferred write failed for %s: %v\n", path, err)
+		}
+	}
+}
+
+func flushRuntimeState() {
+	flushDeferredWrites()
+	savePool()
+	flushRequestLogs(requestLogsPath)
+}
 
 func writeAndSyncFile(path string, data []byte, mode os.FileMode) error {
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)

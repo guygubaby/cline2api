@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 )
@@ -14,6 +15,8 @@ var (
 	pool                      *AccountPool
 	poolMu                    sync.Mutex
 	poolSaveMu                sync.Mutex
+	poolDeferredSaveOnce      sync.Once
+	poolDeferredSaveWake      = make(chan string, 1)
 	poolPath                  string
 	tokenRefreshSchedulerOnce sync.Once
 )
@@ -107,17 +110,35 @@ func loadPool() *AccountPool {
 	return pool
 }
 
-func savePool() {
+func savePoolToPath(path string) {
 	poolSaveMu.Lock()
 	defer poolSaveMu.Unlock()
-
+	poolMu.Lock()
 	data, err := json.MarshalIndent(pool, "", "  ")
+	poolMu.Unlock()
 	if err != nil {
 		log.Printf("Failed to encode accounts: %v", err)
 		return
 	}
-	if err := writeFileDurably(poolPath, data, 0600); err != nil {
+	if err := writeFileDurably(path, data, 0600); err != nil {
 		log.Printf("Failed to save accounts: %v", err)
+	}
+}
+
+func savePool() { savePoolToPath(poolPath) }
+
+func savePoolEventually() {
+	poolDeferredSaveOnce.Do(func() {
+		go func() {
+			for path := range poolDeferredSaveWake {
+				time.Sleep(deferredWriteDelay)
+				savePoolToPath(path)
+			}
+		}()
+	})
+	select {
+	case poolDeferredSaveWake <- poolPath:
+	default:
 	}
 }
 
@@ -132,16 +153,19 @@ func addAccount(acc *Account) {
 func removeAccount(accountID string) bool {
 	p := loadPool()
 	poolMu.Lock()
-	defer poolMu.Unlock()
-
+	found := false
 	for i, a := range p.Accounts {
 		if a.AccountID == accountID {
 			p.Accounts = append(p.Accounts[:i], p.Accounts[i+1:]...)
-			savePool()
-			return true
+			found = true
+			break
 		}
 	}
-	return false
+	poolMu.Unlock()
+	if found {
+		savePool()
+	}
+	return found
 }
 
 func getAccountByID(accountID string) *Account {
@@ -169,7 +193,9 @@ func refreshAccountToken(acc *Account) error {
 
 func refreshAccountTokenLocked(acc *Account) error {
 	if acc.RefreshToken == "" {
+		poolMu.Lock()
 		acc.Status = "expired"
+		poolMu.Unlock()
 		savePool()
 		return fmt.Errorf("refresh token is empty")
 	}
@@ -179,18 +205,22 @@ func refreshAccountTokenLocked(acc *Account) error {
 		// A proactive refresh can fail transiently while the current access token
 		// is still usable. Keep that account active so the scheduler can retry.
 		if acc.AccessToken == "" || time.Now().UnixMilli() >= acc.ExpiresAt {
+			poolMu.Lock()
 			acc.Status = "expired"
+			poolMu.Unlock()
 			savePool()
 		}
 		return fmt.Errorf("token refresh failed: %w", err)
 	}
 
+	poolMu.Lock()
 	acc.AccessToken = "workos:" + resp.Data.AccessToken
 	if resp.Data.RefreshToken != "" {
 		acc.RefreshToken = resp.Data.RefreshToken
 	}
 	acc.ExpiresAt = parseExpiry(resp.Data.ExpiresAt) - 60000
 	acc.Status = "active"
+	poolMu.Unlock()
 	savePool()
 	return nil
 }
@@ -335,12 +365,9 @@ func pickAccountForModelWithFallback(model string, fallbackToActive bool) *Accou
 
 	// 该模型未冷却的账号列表
 	eligible := make([]*Account, 0, len(active))
+	now := time.Now()
 	for _, a := range active {
-		until, cool := a.ModelCooldowns[model]
-		if !cool || time.Now().After(until) {
-			if cool {
-				delete(a.ModelCooldowns, model)
-			}
+		if accountAvailableForModel(a, model, now, nil) {
 			eligible = append(eligible, a)
 		}
 	}
@@ -353,47 +380,208 @@ func pickAccountForModelWithFallback(model string, fallbackToActive bool) *Accou
 		return nil
 	}
 
-	cfg := getProxyConfig()
-	var acc *Account
-	switch cfg.Strategy {
-	case "fill":
-		acc = eligible[0]
-	case "random":
-		n := time.Now().UnixNano() % int64(len(eligible))
-		acc = eligible[n]
-	default: // round_robin
-		if p.CurrentIdx >= len(eligible) {
-			p.CurrentIdx = 0
-		}
-		acc = eligible[p.CurrentIdx]
-		p.CurrentIdx = (p.CurrentIdx + 1) % len(eligible)
-	}
-	savePool()
-	return acc
+	return selectAccountByStrategy(eligible, model, &p.CurrentIdx)
 }
 
-// pickAlternativeAccountForModel returns one active account other than the
-// account that produced an empty response. It is used only for one bounded
-// retry and does not change the configured pool strategy or cooldown state.
+func selectAccountByStrategy(accounts []*Account, model string, currentIndex *int) *Account {
+	switch getProxyConfig().Strategy {
+	case "fill":
+		return accounts[0]
+	case "random":
+		index := int(time.Now().UnixNano() % int64(len(accounts)))
+		return accounts[index]
+	case "least_latency":
+		if model == "" {
+			return accounts[0]
+		}
+		return fastestAccountForModel(accounts, model)
+	default: // round_robin
+		if *currentIndex >= len(accounts) {
+			*currentIndex = 0
+		}
+		account := accounts[*currentIndex]
+		*currentIndex = (*currentIndex + 1) % len(accounts)
+		return account
+	}
+}
+
+func fastestAccountForModel(accounts []*Account, model string) *Account {
+	var fastest *Account
+	fastestLatency := 0.0
+	for _, account := range accounts {
+		latency, known := accountLatency(account, model)
+		if !known {
+			return account
+		}
+		if fastest == nil || latency < fastestLatency {
+			fastest = account
+			fastestLatency = latency
+		}
+	}
+	if fastest != nil {
+		return fastest
+	}
+	return accounts[0]
+}
+
+func observeAccountModelLatency(account *Account, model string, elapsed time.Duration) {
+	if account == nil || model == "" || elapsed <= 0 {
+		return
+	}
+	loadPool()
+	poolMu.Lock()
+	if account.ModelLatencies == nil {
+		account.ModelLatencies = map[string]*ModelLatencyStat{}
+	}
+	stat := account.ModelLatencies[model]
+	if stat == nil {
+		stat = &ModelLatencyStat{}
+		account.ModelLatencies[model] = stat
+	}
+	observeModelLatency(stat, elapsed)
+	poolMu.Unlock()
+	savePoolEventually()
+}
+
+func bestAlternativeAccountLatency(account *Account, model string) float64 {
+	p := loadPool()
+	poolMu.Lock()
+	defer poolMu.Unlock()
+	best := 0.0
+	for _, candidate := range p.Accounts {
+		if candidate == nil || candidate == account || candidate.Status != "active" {
+			continue
+		}
+		stat := candidate.ModelLatencies[model]
+		if stat == nil || stat.Samples == 0 || stat.EWMAms <= 0 {
+			continue
+		}
+		if best == 0 || stat.EWMAms < best {
+			best = stat.EWMAms
+		}
+	}
+	return best
+}
+
+func coolSlowAccountIfNeeded(account *Account, model string, elapsed time.Duration) {
+	if anomalouslySlowLatency(elapsed, bestAlternativeAccountLatency(account, model)) {
+		setModelCooldown(account, model, time.Now().Add(slowChannelCooldown))
+	}
+}
+
+// pickAlternativeAccountForModel returns one eligible account after excluded.
 func pickAlternativeAccountForModel(model string, excluded *Account) *Account {
+	accounts := pickAlternativeAccountsForModel(model, excluded, 1)
+	if len(accounts) == 0 {
+		return nil
+	}
+	return accounts[0]
+}
+
+func sameAccount(left, right *Account) bool {
+	if left == nil || right == nil {
+		return false
+	}
+	return left == right || (left.AccountID != "" && left.AccountID == right.AccountID)
+}
+
+func accountAvailableForModel(account *Account, model string, now time.Time, excluded *Account) bool {
+	if account == nil || account.Status != "active" || sameAccount(account, excluded) {
+		return false
+	}
+	until, cooling := account.ModelCooldowns[model]
+	if !cooling {
+		return true
+	}
+	if now.Before(until) {
+		return false
+	}
+	delete(account.ModelCooldowns, model)
+	return true
+}
+
+func accountIndex(accounts []*Account, target *Account) int {
+	for index, account := range accounts {
+		if sameAccount(account, target) {
+			return index
+		}
+	}
+	return -1
+}
+
+func availableAccountsForModel(accounts []*Account, model string, excluded *Account, start int) []*Account {
+	available := make([]*Account, 0, len(accounts))
+	now := time.Now()
+	for offset := 0; offset < len(accounts); offset++ {
+		account := accounts[(start+offset)%len(accounts)]
+		if accountAvailableForModel(account, model, now, excluded) {
+			available = append(available, account)
+		}
+	}
+	return available
+}
+
+func accountLatency(account *Account, model string) (float64, bool) {
+	stat := account.ModelLatencies[model]
+	if stat == nil || stat.Samples == 0 || stat.EWMAms <= 0 {
+		return 0, false
+	}
+	return stat.EWMAms, true
+}
+
+func orderAccountsByLatency(accounts []*Account, model string) {
+	sort.SliceStable(accounts, func(left, right int) bool {
+		leftLatency, leftKnown := accountLatency(accounts[left], model)
+		rightLatency, rightKnown := accountLatency(accounts[right], model)
+		if leftKnown != rightKnown {
+			return !leftKnown
+		}
+		if !leftKnown {
+			return false
+		}
+		return leftLatency < rightLatency
+	})
+}
+
+func rotateAccounts(accounts []*Account, start int) []*Account {
+	if start == 0 || len(accounts) < 2 {
+		return accounts
+	}
+	rotated := make([]*Account, len(accounts))
+	for index := range accounts {
+		rotated[index] = accounts[(start+index)%len(accounts)]
+	}
+	return rotated
+}
+
+func pickAlternativeAccountsForModel(model string, excluded *Account, limit int) []*Account {
+	if limit <= 0 {
+		return nil
+	}
 	p := loadPool()
 	poolMu.Lock()
 	defer poolMu.Unlock()
 
-	now := time.Now()
-	for _, account := range p.Accounts {
-		if account == nil || account.Status != "active" || account == excluded {
-			continue
-		}
-		if excluded != nil && account.AccountID != "" && account.AccountID == excluded.AccountID {
-			continue
-		}
-		if until, cooling := account.ModelCooldowns[model]; cooling && now.Before(until) {
-			continue
-		}
-		return account
+	strategy := getProxyConfig().Strategy
+	start := 0
+	if strategy == "round_robin" || strategy == "" {
+		start = accountIndex(p.Accounts, excluded) + 1
 	}
-	return nil
+	candidates := availableAccountsForModel(p.Accounts, model, excluded, start)
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	switch strategy {
+	case "least_latency":
+		orderAccountsByLatency(candidates, model)
+	case "random":
+		candidates = rotateAccounts(candidates, randIntn(len(candidates)))
+	}
+	if limit > len(candidates) {
+		limit = len(candidates)
+	}
+	return append([]*Account(nil), candidates[:limit]...)
 }
 
 // pickAccountLocked 在已持有 poolMu 的前提下执行普通轮询挑选（供 pickAccountForModel 回退用）。
@@ -407,23 +595,7 @@ func pickAccountLocked(p *AccountPool) *Account {
 	if len(active) == 0 {
 		return nil
 	}
-	cfg := getProxyConfig()
-	var acc *Account
-	switch cfg.Strategy {
-	case "fill":
-		acc = active[0]
-	case "random":
-		n := time.Now().UnixNano() % int64(len(active))
-		acc = active[n]
-	default:
-		if p.CurrentIdx >= len(active) {
-			p.CurrentIdx = 0
-		}
-		acc = active[p.CurrentIdx]
-		p.CurrentIdx = (p.CurrentIdx + 1) % len(active)
-	}
-	savePool()
-	return acc
+	return selectAccountByStrategy(active, "", &p.CurrentIdx)
 }
 
 func ensureAccountToken(acc *Account) (string, error) {
@@ -479,6 +651,13 @@ func listAccounts() []*Account {
 			cp.ModelCooldowns = make(map[string]time.Time, len(a.ModelCooldowns))
 			for mid, until := range a.ModelCooldowns {
 				cp.ModelCooldowns[mid] = until
+			}
+		}
+		if len(a.ModelLatencies) > 0 {
+			cp.ModelLatencies = make(map[string]*ModelLatencyStat, len(a.ModelLatencies))
+			for modelID, latency := range a.ModelLatencies {
+				latencyCopy := *latency
+				cp.ModelLatencies[modelID] = &latencyCopy
 			}
 		}
 		result[i] = cp

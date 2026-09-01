@@ -45,6 +45,32 @@ func TestHandleAnthropicStreamPreservesReasoningBeforeToolUse(t *testing.T) {
 	}
 }
 
+func TestHandleAnthropicStreamForwardsToolArgumentsIncrementally(t *testing.T) {
+	upstreamBody := strings.Join([]string{
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"Read","arguments":"{\"file_"}}]}}]}`,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"path\":\"README.md\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":20,"completion_tokens":8,"total_tokens":28}}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	recorder := httptest.NewRecorder()
+	reqLog := &RequestLog{StartedAt: time.Now(), Protocol: "anthropic", Model: "m1", Stream: true}
+
+	handleAnthropicStream(recorder, &http.Response{Body: io.NopCloser(strings.NewReader(upstreamBody))}, nil, reqLog, 20)
+
+	events := decodeSSEEvents(t, recorder.Body.String())
+	deltas := []string{}
+	for _, event := range events {
+		delta, _ := event["delta"].(map[string]any)
+		if delta["type"] == "input_json_delta" {
+			value, _ := delta["partial_json"].(string)
+			deltas = append(deltas, value)
+		}
+	}
+	if len(deltas) != 2 || strings.Join(deltas, "") != `{"file_path":"README.md"}` {
+		t.Fatalf("tool argument deltas = %#v", deltas)
+	}
+}
+
 func TestAnthropicThinkingToolHistoryRoundTripsToReasoningContent(t *testing.T) {
 	raw := `{
 		"model":"m1",
@@ -252,6 +278,89 @@ func TestCallClineAnthropicStreamRetriesOneAlternativeAfterEmptyOutput(t *testin
 	}
 }
 
+func TestCallClineAnthropicStreamTriesThreeDistinctAccountsAndCoolsEmptyOnes(t *testing.T) {
+	model := "deepseek/deepseek-v4-flash"
+	firstAccount := &Account{
+		AccountID: "empty-first", Email: "first@example.com", AccessToken: "workos:first",
+		ExpiresAt: time.Now().Add(time.Hour).UnixMilli(), Status: "active", ModelCooldowns: map[string]time.Time{},
+	}
+	secondAccount := &Account{
+		AccountID: "empty-second", Email: "second@example.com", AccessToken: "workos:second",
+		ExpiresAt: time.Now().Add(time.Hour).UnixMilli(), Status: "active", ModelCooldowns: map[string]time.Time{},
+	}
+	thirdAccount := &Account{
+		AccountID: "healthy-third", Email: "third@example.com", AccessToken: "workos:third",
+		ExpiresAt: time.Now().Add(time.Hour).UnixMilli(), Status: "active", ModelCooldowns: map[string]time.Time{},
+	}
+	currentPool := loadPool()
+	poolMu.Lock()
+	oldAccounts, oldIndex := currentPool.Accounts, currentPool.CurrentIdx
+	currentPool.Accounts = []*Account{firstAccount, secondAccount, thirdAccount}
+	currentPool.CurrentIdx = 0
+	poolMu.Unlock()
+	oldStrategy := getProxyConfig().Strategy
+	testConfig := getProxyConfig()
+	testConfig.Strategy = "round_robin"
+	setProxyConfig(testConfig)
+	t.Cleanup(func() {
+		poolMu.Lock()
+		currentPool.Accounts = oldAccounts
+		currentPool.CurrentIdx = oldIndex
+		poolMu.Unlock()
+		testConfig := getProxyConfig()
+		testConfig.Strategy = oldStrategy
+		setProxyConfig(testConfig)
+		savePool()
+	})
+
+	oldHTTPClient := httpClient
+	requestedTokens := []string{}
+	httpClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		token := strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer ")
+		requestedTokens = append(requestedTokens, token)
+		body := strings.Join([]string{
+			`data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":0,"total_tokens":100}}`,
+			`data: [DONE]`,
+			``,
+		}, "\n")
+		if token == "workos:third" {
+			body = strings.Join([]string{
+				`data: {"choices":[{"delta":{"content":"ready"}}]}`,
+				`data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":1,"total_tokens":101}}`,
+				`data: [DONE]`,
+				``,
+			}, "\n")
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    request,
+		}, nil
+	})}
+	t.Cleanup(func() { httpClient = oldHTTPClient })
+
+	prepared, account, diagnostic, err := callClineAnthropicStream(map[string]any{
+		"model": model, "max_tokens": float64(32000), "stream": true,
+		"messages": []any{map[string]any{"role": "user", "content": "continue after compact"}},
+	})
+	if err != nil {
+		t.Fatalf("third-account recovery failed: %v", err)
+	}
+	defer prepared.Body.Close()
+	if account != thirdAccount || diagnostic.RetryCount != 2 {
+		t.Fatalf("recovery account=%#v diagnostic=%#v", account, diagnostic)
+	}
+	if got := strings.Join(requestedTokens, ","); got != "workos:first,workos:second,workos:third" {
+		t.Fatalf("attempt order = %q", got)
+	}
+	for _, account := range []*Account{firstAccount, secondAccount} {
+		if until := account.ModelCooldowns[model]; !until.After(time.Now()) {
+			t.Fatalf("empty account was not cooled: account=%s cooldown=%v", account.AccountID, until)
+		}
+	}
+}
+
 func TestCallClineAnthropicStreamCoolsDownAccountAfterFirstEventTimeout(t *testing.T) {
 	firstAccount := &Account{
 		AccountID: "slow", Email: "slow@example.com", AccessToken: "workos:slow",
@@ -316,11 +425,13 @@ func TestCallClineAnthropicStreamCoolsDownAccountAfterFirstEventTimeout(t *testi
 		"stream":     true,
 		"messages":   []any{map[string]any{"role": "user", "content": "Inspect the project."}},
 	}, 20*time.Millisecond)
-	if err != nil {
-		t.Fatalf("retry after first-event timeout: %v", err)
+	if !errors.Is(err, errUpstreamFirstEventTimeout) {
+		t.Fatalf("first-event timeout = %v", err)
 	}
-	defer prepared.Body.Close()
-	if requestCount != 2 || account != secondAccount || diagnostic.RetryCount != 1 {
+	if prepared != nil {
+		prepared.Body.Close()
+	}
+	if requestCount != 1 || account != firstAccount || diagnostic.RetryCount != 0 {
 		t.Fatalf("timeout retry result: requests=%d account=%#v diagnostic=%#v", requestCount, account, diagnostic)
 	}
 	if until := firstAccount.ModelCooldowns[model]; !until.After(time.Now()) {
@@ -328,7 +439,7 @@ func TestCallClineAnthropicStreamCoolsDownAccountAfterFirstEventTimeout(t *testi
 	}
 }
 
-func TestAnthropicRepeatedSemanticEmptyIsNonRetryableAndCircuitBroken(t *testing.T) {
+func TestAnthropicRepeatedSemanticEmptyIsOverloadedAndCircuitBroken(t *testing.T) {
 	semanticEmptyCircuitsMu.Lock()
 	oldCircuits := semanticEmptyCircuits
 	semanticEmptyCircuits = map[string]semanticEmptyCircuitEntry{}
@@ -393,24 +504,28 @@ func TestAnthropicRepeatedSemanticEmptyIsNonRetryableAndCircuitBroken(t *testing
 	}
 
 	first := call()
-	if first.Code != http.StatusBadRequest {
-		t.Fatalf("first status = %d, want 400; body=%s", first.Code, first.Body.String())
+	if first.Code != 529 {
+		t.Fatalf("first status = %d, want 529; body=%s", first.Code, first.Body.String())
 	}
 	var errorResponse map[string]any
 	if err := json.Unmarshal(first.Body.Bytes(), &errorResponse); err != nil {
 		t.Fatalf("decode first error: %v", err)
 	}
 	errorBody, _ := errorResponse["error"].(map[string]any)
-	if errorBody["type"] != "invalid_request_error" || !strings.Contains(errorBody["message"].(string), "/compact") {
-		t.Fatalf("first error is not actionable/non-retryable: %#v", errorResponse)
+	message, _ := errorBody["message"].(string)
+	if errorBody["type"] != "overloaded_error" || strings.Contains(message, "/compact") || !strings.Contains(message, "empty response") {
+		t.Fatalf("short-context error is misleading: %#v", errorResponse)
+	}
+	if first.Header().Get("Retry-After") == "" {
+		t.Fatal("short-context upstream overload did not include Retry-After")
 	}
 	if requestCount != 2 {
 		t.Fatalf("first call upstream requests = %d, want primary + one alternate", requestCount)
 	}
 
 	second := call()
-	if second.Code != http.StatusBadRequest {
-		t.Fatalf("second status = %d, want 400; body=%s", second.Code, second.Body.String())
+	if second.Code != 529 {
+		t.Fatalf("second status = %d, want 529; body=%s", second.Code, second.Body.String())
 	}
 	if requestCount != 2 {
 		t.Fatalf("identical retry reached upstream: requests=%d, want 2", requestCount)
@@ -425,6 +540,21 @@ func TestAnthropicRepeatedSemanticEmptyIsNonRetryableAndCircuitBroken(t *testing
 	}
 	if entry.ThinkingTokens != 0 || !entry.RetrySuppressed || entry.Upstream != upstreamCline {
 		t.Fatalf("semantic-empty suppression metadata missing: %#v", entry)
+	}
+	if entry.EstimatedInputTokens <= 0 || entry.UpstreamAttempts != 2 {
+		t.Fatalf("semantic-empty attempt/input metadata missing: %#v", entry)
+	}
+}
+
+func TestSemanticEmptyOnlySuggestsCompactionNearContextLimit(t *testing.T) {
+	short := semanticEmptyResponseFor("deepseek/deepseek-v4-flash", 32_000, 3)
+	if short.Status != 529 || short.ErrorType != "overloaded_error" || strings.Contains(short.Message, "/compact") {
+		t.Fatalf("short-context response = %#v", short)
+	}
+
+	nearLimit := semanticEmptyResponseFor("deepseek/deepseek-v4-flash", 900_000, 3)
+	if nearLimit.Status != http.StatusBadRequest || nearLimit.ErrorType != "invalid_request_error" || !strings.Contains(nearLimit.Message, "/compact") {
+		t.Fatalf("near-limit response = %#v", nearLimit)
 	}
 }
 

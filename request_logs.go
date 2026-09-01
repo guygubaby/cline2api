@@ -26,37 +26,43 @@ type RequestLog struct {
 	AccountEmail string    `json:"accountEmail"`
 	Protocol     string    `json:"protocol"`
 	// Upstream 标记上游来源：cline、opencode 或 custom:<渠道名>
-	Upstream        string  `json:"upstream,omitempty"`
-	Model           string  `json:"model"`
-	Stream          bool    `json:"stream"`
-	InputTokens     int64   `json:"inputTokens"`
-	OutputTokens    int64   `json:"outputTokens"`
-	CachedTokens    int64   `json:"cachedTokens"`
-	TotalTokens     int64   `json:"totalTokens"`
-	UsageAvailable  bool    `json:"usageAvailable"`
-	DurationMs      int64   `json:"durationMs"`
-	TTFTMs          int64   `json:"ttftMs"`
-	UpstreamTTFTMs  int64   `json:"upstreamTtftMs,omitempty"`
-	ThinkingTTFTMs  int64   `json:"thinkingTtftMs,omitempty"`
-	VisibleTTFTMs   int64   `json:"visibleTtftMs,omitempty"`
-	OutputTPS       float64 `json:"outputTokensPerSecond"`
-	Completed       bool    `json:"completed"`
-	Error           string  `json:"error,omitempty"`
-	ErrorCode       string  `json:"errorCode,omitempty"`
-	FinishReason    string  `json:"finishReason,omitempty"`
-	SawDone         bool    `json:"sawDone,omitempty"`
-	RetryCount      int     `json:"retryCount,omitempty"`
-	RequestHMAC     string  `json:"requestHmac,omitempty"`
-	UpstreamTaskID  string  `json:"upstreamTaskId,omitempty"`
-	ReasoningChars  int     `json:"reasoningChars,omitempty"`
-	ThinkingTokens  int64   `json:"thinkingTokens,omitempty"`
-	RetrySuppressed bool    `json:"retrySuppressed,omitempty"`
+	Upstream             string  `json:"upstream,omitempty"`
+	Model                string  `json:"model"`
+	Stream               bool    `json:"stream"`
+	InputTokens          int64   `json:"inputTokens"`
+	OutputTokens         int64   `json:"outputTokens"`
+	CachedTokens         int64   `json:"cachedTokens"`
+	TotalTokens          int64   `json:"totalTokens"`
+	UsageAvailable       bool    `json:"usageAvailable"`
+	DurationMs           int64   `json:"durationMs"`
+	TTFTMs               int64   `json:"ttftMs"`
+	UpstreamTTFTMs       int64   `json:"upstreamTtftMs,omitempty"`
+	ThinkingTTFTMs       int64   `json:"thinkingTtftMs,omitempty"`
+	VisibleTTFTMs        int64   `json:"visibleTtftMs,omitempty"`
+	OutputTPS            float64 `json:"outputTokensPerSecond"`
+	Completed            bool    `json:"completed"`
+	Error                string  `json:"error,omitempty"`
+	ErrorCode            string  `json:"errorCode,omitempty"`
+	FinishReason         string  `json:"finishReason,omitempty"`
+	SawDone              bool    `json:"sawDone,omitempty"`
+	RetryCount           int     `json:"retryCount,omitempty"`
+	UpstreamAttempts     int     `json:"upstreamAttempts,omitempty"`
+	EstimatedInputTokens int     `json:"estimatedInputTokens,omitempty"`
+	RequestHMAC          string  `json:"requestHmac,omitempty"`
+	UpstreamTaskID       string  `json:"upstreamTaskId,omitempty"`
+	ReasoningChars       int     `json:"reasoningChars,omitempty"`
+	ThinkingTokens       int64   `json:"thinkingTokens,omitempty"`
+	RetrySuppressed      bool    `json:"retrySuppressed,omitempty"`
 }
 
 var (
-	requestLogs     []RequestLog
-	requestLogsMu   sync.Mutex
-	requestLogsPath string
+	requestLogs         []RequestLog
+	requestLogsMu       sync.Mutex
+	requestLogsSaveMu   sync.Mutex
+	requestLogsPath     string
+	requestLogsDirty    bool
+	requestLogsSaveOnce sync.Once
+	requestLogsSaveWake = make(chan string, 1)
 )
 
 func newRequestLog(protocol, model string, stream bool) RequestLog {
@@ -112,14 +118,69 @@ func pruneRequestLogsLocked(entries []RequestLog) []RequestLog {
 	return pruned
 }
 
-func saveRequestLogsLocked() {
-	data, err := json.MarshalIndent(requestLogs, "", "  ")
-	if err != nil {
-		log.Printf("Failed to encode request logs: %v", err)
+func requestLogNewer(left, right RequestLog) bool {
+	if !left.StartedAt.Equal(right.StartedAt) {
+		return left.StartedAt.After(right.StartedAt)
+	}
+	return left.ID > right.ID
+}
+
+func insertRequestLogLocked(entries []RequestLog, entry RequestLog) []RequestLog {
+	index := sort.Search(len(entries), func(index int) bool {
+		return !requestLogNewer(entries[index], entry)
+	})
+	entries = append(entries, RequestLog{})
+	copy(entries[index+1:], entries[index:])
+	entries[index] = entry
+	cutoff := time.Now().Add(-requestLogMaxAge)
+	for len(entries) > 0 && entries[len(entries)-1].StartedAt.Before(cutoff) {
+		entries = entries[:len(entries)-1]
+	}
+	if len(entries) > requestLogMaxEntries {
+		entries = entries[:requestLogMaxEntries]
+	}
+	return entries
+}
+
+func flushRequestLogs(path string) {
+	requestLogsSaveMu.Lock()
+	defer requestLogsSaveMu.Unlock()
+	requestLogsMu.Lock()
+	if !requestLogsDirty {
+		requestLogsMu.Unlock()
 		return
 	}
-	if err := writeFileDurably(requestLogsPath, data, 0600); err != nil {
+	entries := append([]RequestLog(nil), requestLogs...)
+	requestLogsDirty = false
+	requestLogsMu.Unlock()
+	data, err := json.MarshalIndent(entries, "", "  ")
+	if err != nil {
+		log.Printf("Failed to encode request logs: %v", err)
+		requestLogsMu.Lock()
+		requestLogsDirty = true
+		requestLogsMu.Unlock()
+		return
+	}
+	if err := writeFileDurably(path, data, 0600); err != nil {
 		log.Printf("Failed to save request logs: %v", err)
+		requestLogsMu.Lock()
+		requestLogsDirty = true
+		requestLogsMu.Unlock()
+	}
+}
+
+func saveRequestLogsEventually() {
+	requestLogsSaveOnce.Do(func() {
+		go func() {
+			for path := range requestLogsSaveWake {
+				time.Sleep(deferredWriteDelay)
+				flushRequestLogs(path)
+			}
+		}()
+	})
+	select {
+	case requestLogsSaveWake <- requestLogsPath:
+	default:
 	}
 }
 
@@ -128,10 +189,10 @@ func appendRequestLog(entry RequestLog) {
 		entry.ID = fmt.Sprintf("req_%d", entry.StartedAt.UnixNano())
 	}
 	requestLogsMu.Lock()
-	requestLogs = append(requestLogs, entry)
-	requestLogs = pruneRequestLogsLocked(requestLogs)
-	saveRequestLogsLocked()
+	requestLogs = insertRequestLogLocked(requestLogs, entry)
+	requestLogsDirty = true
 	requestLogsMu.Unlock()
+	saveRequestLogsEventually()
 }
 
 func setRequestLogEffectiveModel(entry *RequestLog, params map[string]any) {
@@ -147,10 +208,20 @@ func setRequestLogIsolationMetadata(entry *RequestLog, params map[string]any) {
 	if entry == nil {
 		return
 	}
-	entry.RequestHMAC = canonicalRequestAuditHash(params)
+	entry.RequestHMAC, _ = params[proxyAuditHashParamKey].(string)
+	if entry.RequestHMAC == "" {
+		entry.RequestHMAC = canonicalRequestAuditHash(params)
+		params[proxyAuditHashParamKey] = entry.RequestHMAC
+	}
 	entry.UpstreamTaskID, _ = params[proxyUpstreamTaskParamKey].(string)
-	if attempts, _ := params[proxyUpstreamCountParamKey].(int); attempts > 1 && entry.RetryCount < attempts-1 {
-		entry.RetryCount = attempts - 1
+	if attempts, _ := params[proxyUpstreamCountParamKey].(int); attempts > 0 {
+		entry.UpstreamAttempts = attempts
+		if entry.RetryCount < attempts-1 {
+			entry.RetryCount = attempts - 1
+		}
+	}
+	if upstreamTTFT, ok := params[proxyUpstreamTTFTParamKey].(int64); ok && upstreamTTFT > 0 {
+		entry.UpstreamTTFTMs = upstreamTTFT
 	}
 }
 

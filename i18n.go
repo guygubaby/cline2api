@@ -150,8 +150,12 @@ var apiMessages = map[string]map[locale]string{
 		localeEN: "Key deleted",
 	},
 	"invalid_strategy": {
-		localeZH: "无效的轮询策略，可选：round_robin、fill、random",
-		localeEN: "invalid strategy, must be: round_robin, fill, random",
+		localeZH: "无效的轮询策略，可选：round_robin、fill、random、least_latency",
+		localeEN: "invalid strategy, must be: round_robin, fill, random, least_latency",
+	},
+	"invalid_anthropic_effort": {
+		localeZH: "无效的 Anthropic effort，可选：low、medium、high",
+		localeEN: "invalid Anthropic effort; choose low, medium, or high",
 	},
 	"invalid_default_model": {
 		localeZH: "无效的默认模型，不在可用模型列表中",

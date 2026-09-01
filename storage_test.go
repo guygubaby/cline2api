@@ -32,3 +32,18 @@ func TestWriteFileDurablyFallsBackWhenBindMountRejectsRename(t *testing.T) {
 		t.Fatalf("temporary file was not cleaned up: %v", err)
 	}
 }
+
+func TestDeferredDurableWriteCoalescesLatestValue(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "deferred.json")
+	queueDurableWrite(target, []byte("first"), 0600)
+	queueDurableWrite(target, []byte("latest"), 0600)
+	flushDeferredWrites()
+
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read deferred write: %v", err)
+	}
+	if string(data) != "latest" {
+		t.Fatalf("deferred write = %q, want latest", data)
+	}
+}

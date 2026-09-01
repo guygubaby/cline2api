@@ -320,6 +320,12 @@ func chatStreamIncludesUsage(params map[string]any) bool {
 
 func startProxy(host string, port int) error {
 	p := loadPool()
+	configureAdminPasswordFromEnvironment()
+	if validLoadBalancingStrategy(p.AccountStrategy) {
+		cfg := getProxyConfig()
+		cfg.Strategy = p.AccountStrategy
+		setProxyConfig(cfg)
+	}
 	loadRequestLogs()
 	activeCount := 0
 	for _, a := range p.Accounts {
@@ -417,9 +423,9 @@ func startProxy(host string, port int) error {
 			return
 		}
 
-		body, err := io.ReadAll(r.Body)
+		body, err := readLimitedRequestBody(w, r, maxProxyRequestBodyBytes)
 		if err != nil {
-			writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+			writeOpenAIError(w, requestBodyErrorStatus(err), "invalid_request_error", err.Error())
 			return
 		}
 
@@ -465,9 +471,11 @@ func startProxy(host string, port int) error {
 			}
 		}
 		attachRequestIsolation(params, reqLog.ID, requestTenantScope(r))
+		attachProxyRequestContext(params, r.Context())
 		setRequestLogIsolationMetadata(&reqLog, params)
 		if customProviderHasModel(model) {
 			response, provider, retryCount, err := callCustomProviderChat(r.Context(), params, isStream)
+			setRequestLogIsolationMetadata(&reqLog, params)
 			reqLog.Upstream = customProviderUpstreamLabel(provider)
 			reqLog.RetryCount = retryCount
 			if err != nil {
@@ -477,12 +485,7 @@ func startProxy(host string, port int) error {
 			}
 			defer response.Body.Close()
 			if isStream {
-				prepared, _, prepareErr := prepareSemanticChatStreamWithTimeout(response, upstreamFirstEventTimeout)
-				if prepareErr != nil {
-					writeOpenAIUpstreamError(w, &reqLog, prepareErr)
-					return
-				}
-				handleStreamResponse(w, prepared, nil, &reqLog, includeUsage)
+				handleStreamResponse(w, response, nil, &reqLog, includeUsage)
 			} else {
 				handleNonStreamResponse(w, response, nil, &reqLog)
 			}
@@ -834,7 +837,7 @@ func callClineAPIWithAccount(acc *Account, params map[string]any, stream bool) (
 		return nil, acc, fmt.Errorf("marshal body: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", clineAPIBase+"/chat/completions", bytes.NewReader(bodyJSON))
+	req, err := http.NewRequestWithContext(proxyRequestContext(params), http.MethodPost, clineAPIBase+"/chat/completions", bytes.NewReader(bodyJSON))
 	if err != nil {
 		return nil, acc, fmt.Errorf("create request: %w", err)
 	}
@@ -853,8 +856,10 @@ func callClineAPIWithAccount(acc *Account, params map[string]any, stream bool) (
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		log.Printf("  upstream audit: request=%s task=%s response_prefix_hmac_sha256=none error=transport", requestID, taskID)
+		poolMu.Lock()
 		acc.Status = "cooldown"
 		acc.CooldownUntil = time.Now().Add(5 * time.Minute)
+		poolMu.Unlock()
 		savePool()
 		return nil, acc, &clineAccountUnavailableError{err: fmt.Errorf("upstream request: %w", err)}
 	}
@@ -870,20 +875,26 @@ func callClineAPIWithAccount(acc *Account, params map[string]any, stream bool) (
 			resp, err = httpClient.Do(req)
 			if err != nil {
 				log.Printf("  upstream audit: request=%s task=%s response_prefix_hmac_sha256=none error=retry_transport", requestID, taskID)
+				poolMu.Lock()
 				acc.Status = "cooldown"
 				acc.CooldownUntil = time.Now().Add(5 * time.Minute)
+				poolMu.Unlock()
 				savePool()
 				return nil, acc, &clineAccountUnavailableError{err: fmt.Errorf("upstream retry: %w", err)}
 			}
 			resp = wrapAuditedResponse(resp, requestID, taskID)
 			if resp.StatusCode == 401 {
 				resp.Body.Close()
+				poolMu.Lock()
 				acc.Status = "expired"
+				poolMu.Unlock()
 				savePool()
 				return nil, acc, &clineAccountUnavailableError{err: fmt.Errorf("account %s token expired permanently", acc.Email)}
 			}
 		} else {
+			poolMu.Lock()
 			acc.Status = "expired"
+			poolMu.Unlock()
 			savePool()
 			return nil, acc, &clineAccountUnavailableError{err: fmt.Errorf("account %s refresh failed: %w", acc.Email, err)}
 		}
@@ -900,17 +911,21 @@ func callClineAPIWithAccount(acc *Account, params map[string]any, stream bool) (
 			if model != "" {
 				setModelCooldown(acc, model, until)
 			} else {
+				poolMu.Lock()
 				acc.Status = "cooldown"
 				acc.CooldownUntil = until
+				poolMu.Unlock()
 				savePool()
 			}
 		}
 		return nil, acc, newUpstreamHTTPError(resp.StatusCode, bodyStr)
 	}
 
+	poolMu.Lock()
 	acc.LastUsed = time.Now()
 	acc.UsageCount++
-	savePool()
+	poolMu.Unlock()
+	savePoolEventually()
 	return resp, acc, nil
 }
 
@@ -1031,10 +1046,13 @@ func testAccount(acc *Account) accountTestResult {
 		result.OutputTokens = usage.Completion
 	}
 	// If the account was in cooldown/expired but the test succeeded, restore it.
-	if acc.Status != "active" {
-		poolMu.Lock()
+	poolMu.Lock()
+	wasInactive := acc.Status != "active"
+	if wasInactive {
 		acc.Status = "active"
-		poolMu.Unlock()
+	}
+	poolMu.Unlock()
+	if wasInactive {
 		savePool()
 	}
 	return result
@@ -1215,7 +1233,7 @@ func recordTokenUsage(acc *Account, model string, usage tokenUsage) {
 		st.CachedTokens += usage.Cached
 	}
 	poolMu.Unlock()
-	savePool()
+	savePoolEventually()
 }
 
 // isFreeModelID 判断模型是否为 free 计费（用于按模型统计和模型级冷却）。
@@ -1235,16 +1253,18 @@ func modelCooldownActive(acc *Account, model string) bool {
 		return false
 	}
 	poolMu.Lock()
-	defer poolMu.Unlock()
 	until, ok := acc.ModelCooldowns[model]
 	if !ok {
+		poolMu.Unlock()
 		return false
 	}
 	if time.Now().After(until) {
 		delete(acc.ModelCooldowns, model)
-		savePool()
+		poolMu.Unlock()
+		savePoolEventually()
 		return false
 	}
+	poolMu.Unlock()
 	return true
 }
 
@@ -1394,6 +1414,12 @@ func handleStreamResponse(w http.ResponseWriter, upstream *http.Response, acc *A
 					if usage := normalizeChatUsage(obj["usage"]); usage != nil {
 						latestUsagePayload = usage
 					}
+					eventAt := time.Now()
+					rawDelta, _ := getNested(obj, "choices", 0, "delta").(map[string]any)
+					if rawDelta == nil {
+						rawDelta, _ = getNested(obj, "choices", 0, "message").(map[string]any)
+					}
+					recordRequestLatencyPhases(reqLog, eventAt, reasoningContent(rawDelta) != "", false)
 
 					normalized := normalizeOpenAIChatResponse(obj, reqLog.Model, true)
 					if streamID == "" {
@@ -1422,9 +1448,10 @@ func handleStreamResponse(w http.ResponseWriter, upstream *http.Response, acc *A
 						finishReason = reason
 					}
 					if hasStandardChatOutput(normalized) {
+						recordRequestLatencyPhases(reqLog, eventAt, false, true)
 						hasOutput = true
 						if firstOutputAt.IsZero() {
-							firstOutputAt = time.Now()
+							firstOutputAt = eventAt
 						}
 					}
 					if shouldForwardStandardChatChunk(normalized) {
@@ -1560,9 +1587,12 @@ type anthropicMsg struct {
 }
 
 type toolAccumulator struct {
-	id   string
-	name string
-	args string
+	id           string
+	name         string
+	args         string
+	started      bool
+	contentIndex int
+	emittedArgs  int
 }
 
 type anthropicReq struct {
@@ -1583,19 +1613,39 @@ type anthropicReq struct {
 	Extra        map[string]any  `json:"-"`
 }
 
+var (
+	overrideCacheMu      sync.Mutex
+	overrideCachePath    string
+	overrideCacheContent string
+	overrideCacheChecked time.Time
+)
+
 func loadOverrideContent() string {
-	data, err := os.ReadFile(resolveDataPath("override.md"))
+	path := resolveDataPath("override.md")
+	overrideCacheMu.Lock()
+	if path == overrideCachePath && time.Since(overrideCacheChecked) < time.Second {
+		content := overrideCacheContent
+		overrideCacheMu.Unlock()
+		return content
+	}
+	overrideCacheMu.Unlock()
+
+	data, err := os.ReadFile(path)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			log.Printf("  override.md read failed: %v", err)
 		}
-		return ""
+		data = nil
 	}
 	content := strings.TrimSpace(string(data))
-	if content == "" {
-		return ""
+	overrideCacheMu.Lock()
+	overrideCachePath = path
+	overrideCacheContent = content
+	overrideCacheChecked = time.Now()
+	overrideCacheMu.Unlock()
+	if content != "" {
+		log.Printf("  using override.md as system prompt (%d bytes)", len(content))
 	}
-	log.Printf("  using override.md as system prompt (%d bytes)", len(content))
 	return content
 }
 
@@ -1711,6 +1761,30 @@ func anthropicOutputConfigToOpenAI(raw json.RawMessage) (string, map[string]any)
 		return effort, map[string]any{"type": "json_object"}
 	}
 	return effort, nil
+}
+
+func anthropicThinkingType(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var thinking map[string]any
+	if err := json.Unmarshal(raw, &thinking); err != nil {
+		return ""
+	}
+	thinkingType, _ := thinking["type"].(string)
+	return thinkingType
+}
+
+func configuredAnthropicEffort() string {
+	p := loadPool()
+	poolMu.Lock()
+	defer poolMu.Unlock()
+	switch p.AnthropicEffort {
+	case "low", "medium", "high":
+		return p.AnthropicEffort
+	default:
+		return "high"
+	}
 }
 
 func validateAnthropicCompatibility(req anthropicReq) error {
@@ -1903,15 +1977,20 @@ func anthropicToOpenAI(req anthropicReq) map[string]any {
 			openAI["parallel_tool_calls"] = *parallel
 		}
 	}
-	if effort, format := anthropicOutputConfigToOpenAI(req.OutputConfig); effort != "" || format != nil {
-		if effort != "" {
-			openAI["reasoning_effort"] = effort
+	effort, format := anthropicOutputConfigToOpenAI(req.OutputConfig)
+	if effort != "" {
+		openAI["reasoning_effort"] = effort
+	}
+	if format != nil {
+		openAI["response_format"] = format
+	}
+	switch anthropicThinkingType(req.Thinking) {
+	case "disabled":
+		openAI["thinking"] = map[string]any{"type": "disabled"}
+	case "adaptive", "enabled":
+		if effort == "" {
+			openAI["reasoning_effort"] = configuredAnthropicEffort()
 		}
-		if format != nil {
-			openAI["response_format"] = format
-		}
-	} else if len(req.Thinking) > 0 {
-		openAI["reasoning_effort"] = "high"
 	}
 	if len(req.Metadata) > 0 {
 		var metadata map[string]any
@@ -2118,10 +2197,24 @@ func openAIToAnthropic(openAI map[string]any) map[string]any {
 	return out
 }
 
+func handleAnthropicChatResponse(w http.ResponseWriter, response *http.Response, reqLog *RequestLog) {
+	var raw map[string]any
+	if err := json.NewDecoder(response.Body).Decode(&raw); err != nil {
+		message := "decode response: " + err.Error()
+		finalizeRequestLog(reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, message)
+		writeAnthropicError(w, http.StatusBadGateway, "api_error", message)
+		return
+	}
+	chatResponse := normalizeOpenAIResponse(unwrapDataEnvelope(raw))
+	usage := parseTokenUsage(chatResponse["usage"])
+	finalizeRequestLog(reqLog, usage, time.Time{}, reqLog.StartedAt, true, "")
+	writeJSON(w, http.StatusOK, openAIToAnthropic(chatResponse))
+}
+
 func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
+	body, err := readLimitedRequestBody(w, r, maxProxyRequestBodyBytes)
 	if err != nil {
-		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		writeAnthropicError(w, requestBodyErrorStatus(err), "invalid_request_error", err.Error())
 		return
 	}
 
@@ -2148,13 +2241,16 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	reqLog := newRequestLog("anthropic", req.Model, req.Stream)
 	openAIReq := anthropicToOpenAI(req)
 	attachRequestIsolation(openAIReq, reqLog.ID, requestTenantScope(r))
+	attachProxyRequestContext(openAIReq, r.Context())
 	setRequestLogIsolationMetadata(&reqLog, openAIReq)
-	estimatedInputTokens := estimateChatInputTokens(openAIReq)
+	estimatedInputTokens := estimateRawRequestTokens(body)
+	reqLog.EstimatedInputTokens = estimatedInputTokens
 
 	log.Printf("  anthropic: model=%s stream=%v msgs=%d history_reasoning_chars=%d",
 		req.Model, req.Stream, len(req.Messages), reasoningHistoryChars(openAIReq))
 	if customProviderHasModel(req.Model) {
 		response, provider, retryCount, callErr := callCustomProviderChat(r.Context(), openAIReq, req.Stream)
+		setRequestLogIsolationMetadata(&reqLog, openAIReq)
 		reqLog.Upstream = customProviderUpstreamLabel(provider)
 		reqLog.RetryCount = retryCount
 		if callErr != nil {
@@ -2164,24 +2260,9 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		}
 		defer response.Body.Close()
 		if req.Stream {
-			prepared, diagnostic, prepareErr := prepareSemanticChatStream(response)
-			if prepareErr != nil {
-				finalizeRequestLog(&reqLog, diagnostic.Usage, time.Time{}, reqLog.StartedAt, false, prepareErr.Error())
-				writeAnthropicError(w, http.StatusBadGateway, "api_error", prepareErr.Error())
-				return
-			}
-			handleAnthropicStream(w, prepared, nil, &reqLog, estimatedInputTokens)
+			handleAnthropicStream(w, response, nil, &reqLog, estimatedInputTokens)
 		} else {
-			var raw map[string]any
-			if err := json.NewDecoder(response.Body).Decode(&raw); err != nil {
-				finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, "decode response: "+err.Error())
-				writeAnthropicError(w, http.StatusBadGateway, "api_error", "decode response: "+err.Error())
-				return
-			}
-			chatResponse := normalizeOpenAIResponse(unwrapDataEnvelope(raw))
-			usage := parseTokenUsage(chatResponse["usage"])
-			finalizeRequestLog(&reqLog, usage, time.Time{}, reqLog.StartedAt, true, "")
-			writeJSON(w, http.StatusOK, openAIToAnthropic(chatResponse))
+			handleAnthropicChatResponse(w, response, &reqLog)
 		}
 		return
 	}
@@ -2225,17 +2306,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 			}
 			handleAnthropicStream(w, prepared, nil, &reqLog, estimatedInputTokens)
 		} else {
-			var raw map[string]any
-			if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
-				finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, "decode response: "+err.Error())
-				writeAnthropicError(w, http.StatusBadGateway, "api_error", "decode response: "+err.Error())
-				return
-			}
-			out2 := normalizeOpenAIResponse(unwrapDataEnvelope(raw))
-			usage := parseTokenUsage(out2["usage"])
-			finalizeRequestLog(&reqLog, usage, time.Time{}, reqLog.StartedAt, true, "")
-			anthropicResp := openAIToAnthropic(out2)
-			writeJSON(w, http.StatusOK, anthropicResp)
+			handleAnthropicChatResponse(w, resp, &reqLog)
 		}
 		return
 	}
@@ -2277,11 +2348,14 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	requestFingerprint := semanticRequestFingerprint(openAIReq)
+	requestFingerprint := reqLog.RequestHMAC
+	if requestFingerprint == "" {
+		requestFingerprint = semanticRequestFingerprint(openAIReq)
+	}
 	if circuitDiagnostic, suppressed := activeSemanticEmptyCircuit(requestFingerprint, time.Now()); suppressed {
 		log.Printf("  anthropic semantic-empty circuit: identical request suppressed finish=%s reasoning_chars=%d thinking_tokens=%d",
 			circuitDiagnostic.FinishReason, circuitDiagnostic.ReasoningChars, circuitDiagnostic.Usage.Reasoning)
-		writeAnthropicSemanticEmpty(w, &reqLog, circuitDiagnostic, true)
+		writeAnthropicSemanticEmpty(w, &reqLog, circuitDiagnostic, true, estimatedInputTokens)
 		return
 	}
 
@@ -2299,7 +2373,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 			diagnostic.FinishReason, diagnostic.ReasoningChars, diagnostic.Usage.Reasoning)
 		if isEmptyResponseError(err) {
 			rememberSemanticEmptyCircuit(requestFingerprint, diagnostic, time.Now())
-			writeAnthropicSemanticEmpty(w, &reqLog, diagnostic, false)
+			writeAnthropicSemanticEmpty(w, &reqLog, diagnostic, false, estimatedInputTokens)
 			return
 		}
 		writeAnthropicUpstreamError(w, &reqLog, diagnostic.Usage, err)
@@ -2328,6 +2402,14 @@ func estimateChatInputTokens(params map[string]any) int {
 	return tokens
 }
 
+func estimateRawRequestTokens(body []byte) int {
+	tokens := len(body) / 4
+	if tokens < 1 {
+		return 1
+	}
+	return tokens
+}
+
 func reasoningHistoryChars(params map[string]any) int {
 	messages, _ := params["messages"].([]any)
 	total := 0
@@ -2344,19 +2426,26 @@ func recordSemanticEmptyDiagnostic(reqLog *RequestLog, diagnostic semanticStream
 	reqLog.ReasoningChars = diagnostic.ReasoningChars
 	reqLog.ThinkingTokens = diagnostic.Usage.Reasoning
 	reqLog.RetryCount = diagnostic.RetryCount
+	if attempts := diagnostic.RetryCount + 1; reqLog.UpstreamAttempts < attempts {
+		reqLog.UpstreamAttempts = attempts
+	}
 	reqLog.RetrySuppressed = retrySuppressed
 }
 
-func writeAnthropicSemanticEmpty(w http.ResponseWriter, reqLog *RequestLog, diagnostic semanticStreamDiagnostic, retrySuppressed bool) {
+func writeAnthropicSemanticEmpty(w http.ResponseWriter, reqLog *RequestLog, diagnostic semanticStreamDiagnostic, retrySuppressed bool, estimatedInputTokens int) {
 	recordSemanticEmptyDiagnostic(reqLog, diagnostic, retrySuppressed)
-	finalizeRequestLog(reqLog, diagnostic.Usage, time.Time{}, reqLog.StartedAt, false, semanticEmptyClientHint)
-	writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", semanticEmptyClientHint)
+	details := semanticEmptyResponseFor(reqLog.Model, estimatedInputTokens, reqLog.UpstreamAttempts)
+	if details.Status == 529 {
+		w.Header().Set("Retry-After", fmt.Sprintf("%d", semanticEmptyRetryAfterSeconds))
+	}
+	finalizeRequestLog(reqLog, diagnostic.Usage, time.Time{}, reqLog.StartedAt, false, details.Message)
+	writeAnthropicError(w, details.Status, details.ErrorType, details.Message)
 }
 
 func handleAnthropicCountTokens(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
+	body, err := readLimitedRequestBody(w, r, maxProxyRequestBodyBytes)
 	if err != nil {
-		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		writeAnthropicError(w, requestBodyErrorStatus(err), "invalid_request_error", err.Error())
 		return
 	}
 	var req anthropicReq
@@ -2372,7 +2461,7 @@ func handleAnthropicCountTokens(w http.ResponseWriter, r *http.Request) {
 		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "messages is required")
 		return
 	}
-	inputTokens := estimateChatInputTokens(anthropicToOpenAI(req))
+	inputTokens := estimateRawRequestTokens(body)
 	writeJSON(w, http.StatusOK, map[string]any{"input_tokens": inputTokens})
 }
 
@@ -2490,24 +2579,45 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 		})
 	}
 
+	startToolBlock := func(acc *toolAccumulator) {
+		if acc.started || acc.id == "" || acc.name == "" {
+			return
+		}
+		acc.started = true
+		acc.contentIndex = nextContentIndex
+		nextContentIndex++
+		emit("content_block_start", map[string]any{
+			"type": "content_block_start", "index": acc.contentIndex,
+			"content_block": map[string]any{"type": "tool_use", "id": acc.id, "name": acc.name, "input": map[string]any{}},
+		})
+	}
+
+	emitPendingToolArgs := func(acc *toolAccumulator) {
+		if !acc.started || acc.emittedArgs >= len(acc.args) {
+			return
+		}
+		emit("content_block_delta", map[string]any{
+			"type": "content_block_delta", "index": acc.contentIndex,
+			"delta": map[string]any{"type": "input_json_delta", "partial_json": acc.args[acc.emittedArgs:]},
+		})
+		acc.emittedArgs = len(acc.args)
+	}
+
+	closeStartedTool := func(acc *toolAccumulator) {
+		if !acc.started {
+			return
+		}
+		if strings.TrimSpace(acc.args) == "" {
+			acc.args = "{}"
+		}
+		emitPendingToolArgs(acc)
+		emit("content_block_stop", map[string]any{"type": "content_block_stop", "index": acc.contentIndex})
+	}
+
 	reader := bufio.NewReader(upstream.Body)
 	var latestUsage tokenUsage
 	var latestRawUsage map[string]any
 	var firstOutputAt time.Time
-	var firstUpstreamOutputAt time.Time
-	var firstThinkingAt time.Time
-	var firstVisibleAt time.Time
-	recordLatencies := func() {
-		if !firstUpstreamOutputAt.IsZero() {
-			reqLog.UpstreamTTFTMs = firstUpstreamOutputAt.Sub(reqLog.StartedAt).Milliseconds()
-		}
-		if !firstThinkingAt.IsZero() {
-			reqLog.ThinkingTTFTMs = firstThinkingAt.Sub(reqLog.StartedAt).Milliseconds()
-		}
-		if !firstVisibleAt.IsZero() {
-			reqLog.VisibleTTFTMs = firstVisibleAt.Sub(reqLog.StartedAt).Milliseconds()
-		}
-	}
 
 	for {
 		line, err := reader.ReadString('\n')
@@ -2545,10 +2655,6 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 		if usage := parseTokenUsage(obj["usage"]); usage.Valid {
 			latestUsage = mergeTokenUsage(latestUsage, usage)
 		}
-		if firstOutputAt.IsZero() && hasFirstOutput(obj) {
-			firstOutputAt = time.Now()
-		}
-
 		// Detect upstream SSE error
 		if errPayload, ok := obj["error"]; ok {
 			errBody, _ := json.Marshal(errPayload)
@@ -2576,16 +2682,10 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 		reasoning := reasoningContent(delta)
 		content, _ := delta["content"].(string)
 		toolCalls, _ := delta["tool_calls"].([]any)
-		if reasoning != "" || content != "" || len(toolCalls) > 0 {
-			if firstUpstreamOutputAt.IsZero() {
-				firstUpstreamOutputAt = eventAt
-			}
-		}
-		if reasoning != "" && firstThinkingAt.IsZero() {
-			firstThinkingAt = eventAt
-		}
-		if (content != "" || len(toolCalls) > 0) && firstVisibleAt.IsZero() {
-			firstVisibleAt = eventAt
+		visible := content != "" || len(toolCalls) > 0
+		recordRequestLatencyPhases(reqLog, eventAt, reasoning != "", visible)
+		if firstOutputAt.IsZero() && (reasoning != "" || visible) {
+			firstOutputAt = eventAt
 		}
 
 		if reasoning != "" {
@@ -2675,6 +2775,10 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 						acc.args += args
 					}
 				}
+				if len(toolOrder) == 1 && pendingTools[toolOrder[0]] == acc {
+					startToolBlock(acc)
+					emitPendingToolArgs(acc)
+				}
 			}
 		}
 
@@ -2694,7 +2798,6 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 	closeTextBlock()
 
 	if streamFailure != nil {
-		recordLatencies()
 		finalizeRequestLog(reqLog, latestUsage, firstOutputAt, reqLog.StartedAt, false, streamFailure.Error())
 		log.Printf("  anthropic stream failed: finish=%s text=%v tools=%d reasoning_chars=%d error=%v",
 			upstreamFinishReason, hasText, len(pendingTools), reasoningChars, streamFailure)
@@ -2708,8 +2811,12 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 		if acc.id == "" || acc.name == "" {
 			continue
 		}
-		emitToolBlock(acc, nextContentIndex)
-		nextContentIndex++
+		if acc.started {
+			closeStartedTool(acc)
+		} else {
+			emitToolBlock(acc, nextContentIndex)
+			nextContentIndex++
+		}
 		emittedTools++
 	}
 	if len(toolOrder) > 0 {
@@ -2722,7 +2829,6 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 			"type":  "error",
 			"error": map[string]any{"type": "api_error", "message": emptyErr.Error()},
 		})
-		recordLatencies()
 		finalizeRequestLog(reqLog, latestUsage, firstOutputAt, reqLog.StartedAt, false, emptyErr.Error())
 		log.Printf("  anthropic stream empty: finish=%s reasoning_chars=%d thinking_tokens=%d",
 			upstreamFinishReason, reasoningChars, latestUsage.Reasoning)
@@ -2739,7 +2845,6 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 		"usage": finalUsage,
 	})
 	recordTokenUsage(acc, reqLog.Model, latestUsage)
-	recordLatencies()
 	finalizeRequestLog(reqLog, latestUsage, firstOutputAt, reqLog.StartedAt, true, "")
 
 	emit("message_stop", map[string]any{"type": "message_stop"})

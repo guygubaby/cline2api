@@ -20,11 +20,68 @@ import (
 const (
 	semanticEmptyCircuitTTL        = 2 * time.Minute
 	semanticEmptyCircuitMaxEntries = 1024
-	semanticEmptyErrorCode         = "semantic_empty"
-	semanticEmptyClientHint        = "upstream returned no reasoning, text, or tool call after retry; compact this conversation with /compact or start a new session with /clear"
+	semanticEmptyErrorCode         = "upstream_empty_response"
+	semanticCompactionThreshold    = 0.85
+	semanticUnknownContextTokens   = 100_000
+	semanticEmptyRetryAfterSeconds = 30
 	upstreamFirstEventTimeout      = 30 * time.Second
 	slowAccountModelCooldown       = time.Minute
+	semanticEmptyAccountCooldown   = time.Minute
+	anthropicSemanticMaxAttempts   = 3
 )
+
+type semanticEmptyResponseDetails struct {
+	Status    int
+	ErrorType string
+	Message   string
+}
+
+func modelInputContextLimit(modelID string) int {
+	if known, exists := knownModelLimits[modelID]; exists {
+		return known.input
+	}
+	for _, model := range getAllModels() {
+		if model.ID == modelID {
+			input, _ := resolvedModelLimits(model)
+			return input
+		}
+	}
+	return 0
+}
+
+func semanticEmptyNeedsCompaction(modelID string, estimatedInputTokens int) bool {
+	if estimatedInputTokens <= 0 {
+		return false
+	}
+	if contextLimit := modelInputContextLimit(modelID); contextLimit > 0 {
+		return float64(estimatedInputTokens) >= float64(contextLimit)*semanticCompactionThreshold
+	}
+	return estimatedInputTokens >= semanticUnknownContextTokens
+}
+
+func semanticEmptyResponseFor(modelID string, estimatedInputTokens, attempts int) semanticEmptyResponseDetails {
+	if attempts < 1 {
+		attempts = 1
+	}
+	if semanticEmptyNeedsCompaction(modelID, estimatedInputTokens) {
+		return semanticEmptyResponseDetails{
+			Status:    http.StatusBadRequest,
+			ErrorType: "invalid_request_error",
+			Message: fmt.Sprintf(
+				"upstream returned an empty response after %d account attempts; input is near the model context limit, compact with /compact or start a new session with /clear",
+				attempts,
+			),
+		}
+	}
+	return semanticEmptyResponseDetails{
+		Status:    529,
+		ErrorType: "overloaded_error",
+		Message: fmt.Sprintf(
+			"upstream returned an empty response after %d account attempts; the model or account pool may be temporarily unavailable, retry later or switch model/channel",
+			attempts,
+		),
+	}
+}
 
 var errUpstreamFirstEventTimeout = errors.New("upstream produced no output event before timeout")
 
@@ -245,13 +302,27 @@ func callClineAnthropicStream(params map[string]any) (*http.Response, *Account, 
 	return callClineAnthropicStreamWithTimeout(params, upstreamFirstEventTimeout)
 }
 
+func coolAnthropicAccountAfterPrepareError(account *Account, model string, err error) {
+	switch {
+	case errors.Is(err, errUpstreamFirstEventTimeout):
+		setModelCooldown(account, model, time.Now().Add(slowAccountModelCooldown))
+	case isEmptyResponseError(err):
+		setModelCooldown(account, model, time.Now().Add(semanticEmptyAccountCooldown))
+	}
+}
+
 func callClineAnthropicStreamWithTimeout(params map[string]any, firstEventTimeout time.Duration) (*http.Response, *Account, semanticStreamDiagnostic, error) {
+	requestStarted := time.Now()
+	attemptStarted := requestStarted
 	response, account, err := callClineAPI(params, true)
 	if err != nil {
 		return nil, account, semanticStreamDiagnostic{}, err
 	}
 	prepared, diagnostic, prepareErr := prepareSemanticChatStreamWithTimeout(response, firstEventTimeout)
 	if prepareErr == nil {
+		elapsed := time.Since(attemptStarted)
+		model, _ := params["model"].(string)
+		recordSuccessfulAccountAttempt(params, account, model, elapsed, elapsed)
 		return prepared, account, diagnostic, nil
 	}
 	if !isEmptyResponseError(prepareErr) && !errors.Is(prepareErr, errUpstreamFirstEventTimeout) {
@@ -259,28 +330,48 @@ func callClineAnthropicStreamWithTimeout(params map[string]any, firstEventTimeou
 	}
 
 	model, _ := params["model"].(string)
+	coolAnthropicAccountAfterPrepareError(account, model, prepareErr)
 	if errors.Is(prepareErr, errUpstreamFirstEventTimeout) {
-		setModelCooldown(account, model, time.Now().Add(slowAccountModelCooldown))
-	}
-	alternative := pickAlternativeAccountForModel(model, account)
-	if alternative == nil {
 		return nil, account, diagnostic, prepareErr
 	}
-	log.Printf("  anthropic stream preflight failed: error=%v finish=%s reasoning_chars=%d thinking_tokens=%d; retrying once with another account",
-		prepareErr, diagnostic.FinishReason, diagnostic.ReasoningChars, diagnostic.Usage.Reasoning)
+	alternatives := pickAlternativeAccountsForModel(model, account, anthropicSemanticMaxAttempts-1)
+	if len(alternatives) == 0 {
+		return nil, account, diagnostic, prepareErr
+	}
+	log.Printf("  anthropic stream preflight failed: error=%v finish=%s reasoning_chars=%d thinking_tokens=%d; trying up to %d alternate accounts",
+		prepareErr, diagnostic.FinishReason, diagnostic.ReasoningChars, diagnostic.Usage.Reasoning, len(alternatives))
 
-	diagnostic.RetryCount = 1
-	retryResponse, retryAccount, retryErr := callClineAPIWithAccount(alternative, params, true)
-	if retryErr != nil {
-		return nil, retryAccount, diagnostic, retryErr
-	}
-	retryPrepared, retryDiagnostic, retryPrepareErr := prepareSemanticChatStreamWithTimeout(retryResponse, firstEventTimeout)
-	retryDiagnostic.RetryCount = 1
-	if retryPrepareErr != nil {
-		if errors.Is(retryPrepareErr, errUpstreamFirstEventTimeout) {
-			setModelCooldown(retryAccount, model, time.Now().Add(slowAccountModelCooldown))
+	lastAccount := account
+	lastDiagnostic := diagnostic
+	lastErr := prepareErr
+	for index, alternative := range alternatives {
+		retryCount := index + 1
+		retryStarted := time.Now()
+		retryResponse, retryAccount, retryErr := callClineAPIWithAccount(alternative, params, true)
+		if retryErr != nil {
+			lastAccount = retryAccount
+			lastDiagnostic.RetryCount = retryCount
+			return nil, lastAccount, lastDiagnostic, retryErr
 		}
-		return nil, retryAccount, retryDiagnostic, retryPrepareErr
+		retryPrepared, retryDiagnostic, retryPrepareErr := prepareSemanticChatStreamWithTimeout(retryResponse, firstEventTimeout)
+		retryDiagnostic.RetryCount = retryCount
+		if retryPrepareErr == nil {
+			elapsed := time.Since(retryStarted)
+			recordSuccessfulAccountAttempt(params, retryAccount, model, elapsed, time.Since(requestStarted))
+			return retryPrepared, retryAccount, retryDiagnostic, nil
+		}
+
+		lastAccount = retryAccount
+		lastDiagnostic = retryDiagnostic
+		lastErr = retryPrepareErr
+		if errors.Is(retryPrepareErr, errUpstreamFirstEventTimeout) {
+			coolAnthropicAccountAfterPrepareError(retryAccount, model, retryPrepareErr)
+			return nil, retryAccount, retryDiagnostic, retryPrepareErr
+		}
+		if !isEmptyResponseError(retryPrepareErr) && !errors.Is(retryPrepareErr, errUpstreamFirstEventTimeout) {
+			return nil, retryAccount, retryDiagnostic, retryPrepareErr
+		}
+		coolAnthropicAccountAfterPrepareError(retryAccount, model, retryPrepareErr)
 	}
-	return retryPrepared, retryAccount, retryDiagnostic, nil
+	return nil, lastAccount, lastDiagnostic, lastErr
 }

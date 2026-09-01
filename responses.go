@@ -698,18 +698,7 @@ func prepareUpstreamChatStreamWithTimeout(response *http.Response, timeout time.
 
 func callClinePreparedStreamWithTimeout(params map[string]any, timeout time.Duration, logPrefix string) (*http.Response, *Account, int, error) {
 	model, _ := params["model"].(string)
-	markUnavailable := func(account *Account, err error) {
-		if account == nil {
-			return
-		}
-		switch {
-		case errors.Is(err, errUpstreamFirstEventTimeout):
-			setModelCooldown(account, model, time.Now().Add(slowAccountModelCooldown))
-		case upstreamErrorStatus(err) == http.StatusTooManyRequests:
-			setModelCooldown(account, model, time.Now().Add(5*time.Minute))
-		}
-	}
-
+	attemptStarted := time.Now()
 	response, account, err := callClineAPI(params, true)
 	if effectiveModel, _ := params["model"].(string); effectiveModel != "" {
 		model = effectiveModel
@@ -717,7 +706,11 @@ func callClinePreparedStreamWithTimeout(params map[string]any, timeout time.Dura
 	if err == nil {
 		response, err = prepareUpstreamChatStreamWithTimeout(response, timeout)
 	}
-	markUnavailable(account, err)
+	if err == nil {
+		elapsed := time.Since(attemptStarted)
+		recordSuccessfulAccountAttempt(params, account, model, elapsed, elapsed)
+	}
+	coolAccountAfterStreamInitializationError(account, model, err)
 	if err == nil || !retryableStreamInitializationError(err) {
 		return response, account, 0, err
 	}
@@ -727,12 +720,17 @@ func callClinePreparedStreamWithTimeout(params map[string]any, timeout time.Dura
 		return nil, account, 0, err
 	}
 	log.Printf("  %s initialization failed (%v); retrying once with another account", logPrefix, err)
+	retryStarted := time.Now()
 	retryResponse, retryAccount, retryErr := callClineAPIWithAccount(alternative, params, true)
 	if retryErr != nil {
 		return nil, retryAccount, 1, retryErr
 	}
 	retryResponse, retryErr = prepareUpstreamChatStreamWithTimeout(retryResponse, timeout)
-	markUnavailable(retryAccount, retryErr)
+	if retryErr == nil {
+		elapsed := time.Since(retryStarted)
+		recordSuccessfulAccountAttempt(params, retryAccount, model, elapsed, time.Since(attemptStarted))
+	}
+	coolAccountAfterStreamInitializationError(retryAccount, model, retryErr)
 	return retryResponse, retryAccount, 1, retryErr
 }
 
@@ -885,6 +883,7 @@ func chatStreamToResponses(w http.ResponseWriter, upstream *http.Response, reqLo
 					var obj map[string]any
 					if json.Unmarshal([]byte(payload), &obj) == nil {
 						obj = unwrapDataEnvelope(obj)
+						eventAt := time.Now()
 						if upstreamError := obj["error"]; upstreamError != nil {
 							streamFailure = streamError(upstreamError)
 							break
@@ -906,6 +905,7 @@ func chatStreamToResponses(w http.ResponseWriter, upstream *http.Response, reqLo
 						}
 						if d, ok := delta.(map[string]any); ok {
 							if reasoning := reasoningContent(d); reasoning != "" {
+								recordRequestLatencyPhases(reqLog, eventAt, true, false)
 								ensureReasoningItem()
 								reasoningText.WriteString(reasoning)
 								s.event("response.reasoning_summary_text.delta", map[string]any{
@@ -913,10 +913,11 @@ func chatStreamToResponses(w http.ResponseWriter, upstream *http.Response, reqLo
 									"summary_index": 0, "delta": reasoning,
 								})
 								if firstOutputAt.IsZero() {
-									firstOutputAt = time.Now()
+									firstOutputAt = eventAt
 								}
 							}
 							if content, _ := d["content"].(string); content != "" {
+								recordRequestLatencyPhases(reqLog, eventAt, false, true)
 								ensureTextItem()
 								outText.WriteString(content)
 								s.event("response.output_text.delta", map[string]any{
@@ -924,6 +925,9 @@ func chatStreamToResponses(w http.ResponseWriter, upstream *http.Response, reqLo
 								})
 							}
 							if calls, ok := d["tool_calls"].([]any); ok {
+								if len(calls) > 0 {
+									recordRequestLatencyPhases(reqLog, eventAt, false, true)
+								}
 								for _, rawCall := range calls {
 									callMap, _ := rawCall.(map[string]any)
 									if callMap == nil {
@@ -985,7 +989,7 @@ func chatStreamToResponses(w http.ResponseWriter, upstream *http.Response, reqLo
 								}
 							}
 							if firstOutputAt.IsZero() && hasFirstOutput(obj) {
-								firstOutputAt = time.Now()
+								firstOutputAt = eventAt
 							}
 						}
 					}
@@ -1202,14 +1206,44 @@ func finalizeResponsesNonStreamLog(reqLog *RequestLog, chat, response map[string
 	finalizeRequestLog(reqLog, usage, time.Time{}, reqLog.StartedAt, completed, errorMessage)
 }
 
+func writeResponsesFromChat(w http.ResponseWriter, chat map[string]any, reqLog *RequestLog, account *Account, request map[string]any) {
+	usage := parseTokenUsage(chat["usage"])
+	if account != nil {
+		recordTokenUsage(account, reqLog.Model, usage)
+	}
+	response := chatToResponsesWithRequest(chat, request)
+	finalizeResponsesNonStreamLog(reqLog, chat, response, usage)
+	writeJSON(w, http.StatusOK, response)
+}
+
+func handleResponsesChatResponse(w http.ResponseWriter, upstream *http.Response, reqLog *RequestLog, request map[string]any) {
+	var raw map[string]any
+	if err := json.NewDecoder(upstream.Body).Decode(&raw); err != nil {
+		message := "decode response: " + err.Error()
+		finalizeRequestLog(reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, message)
+		writeOpenAIError(w, http.StatusBadGateway, "api_error", message)
+		return
+	}
+	writeResponsesFromChat(w, normalizeOpenAIResponse(unwrapDataEnvelope(raw)), reqLog, nil, request)
+}
+
+func streamChatAsResponses(w http.ResponseWriter, upstream *http.Response, reqLog *RequestLog, account *Account, request map[string]any) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.WriteHeader(http.StatusOK)
+	chatStreamToResponses(w, upstream, reqLog, account, request)
+}
+
 func handleResponses(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		writeOpenAIError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
 		return
 	}
-	body, err := io.ReadAll(r.Body)
+	body, err := readLimitedRequestBody(w, r, maxProxyRequestBodyBytes)
 	if err != nil {
-		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		writeOpenAIError(w, requestBodyErrorStatus(err), "invalid_request_error", err.Error())
 		return
 	}
 	var params map[string]any
@@ -1229,10 +1263,12 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 
 	chat := responsesToChat(params)
 	attachRequestIsolation(chat, reqLog.ID, requestTenantScope(r))
+	attachProxyRequestContext(chat, r.Context())
 	setRequestLogIsolationMetadata(&reqLog, chat)
 	chatModel, _ := chat["model"].(string)
 	if customProviderHasModel(chatModel) {
 		upstreamResponse, provider, retryCount, callErr := callCustomProviderChat(r.Context(), chat, isStream)
+		setRequestLogIsolationMetadata(&reqLog, chat)
 		reqLog.Upstream = customProviderUpstreamLabel(provider)
 		reqLog.RetryCount = retryCount
 		if callErr != nil {
@@ -1241,33 +1277,12 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if isStream {
-			prepared, prepareErr := prepareResponsesChatStream(upstreamResponse)
-			if prepareErr != nil {
-				log.Printf("  responses custom provider initialization error: %v", prepareErr)
-				writeOpenAIUpstreamError(w, &reqLog, prepareErr)
-				return
-			}
-			defer prepared.Body.Close()
-			w.Header().Set("Content-Type", "text/event-stream")
-			w.Header().Set("Cache-Control", "no-cache")
-			w.Header().Set("Connection", "keep-alive")
-			w.Header().Set("Access-Control-Allow-Origin", "*")
-			w.WriteHeader(http.StatusOK)
-			chatStreamToResponses(w, prepared, &reqLog, nil, params)
+			defer upstreamResponse.Body.Close()
+			streamChatAsResponses(w, upstreamResponse, &reqLog, nil, params)
 			return
 		}
 		defer upstreamResponse.Body.Close()
-		var raw map[string]any
-		if err := json.NewDecoder(upstreamResponse.Body).Decode(&raw); err != nil {
-			finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, "decode response: "+err.Error())
-			writeOpenAIError(w, http.StatusBadGateway, "api_error", "decode response: "+err.Error())
-			return
-		}
-		chatResponse := normalizeOpenAIResponse(unwrapDataEnvelope(raw))
-		usage := parseTokenUsage(chatResponse["usage"])
-		result := chatToResponsesWithRequest(chatResponse, params)
-		finalizeResponsesNonStreamLog(&reqLog, chatResponse, result, usage)
-		writeJSON(w, http.StatusOK, result)
+		handleResponsesChatResponse(w, upstreamResponse, &reqLog, params)
 		return
 	}
 	route := resolveModelRoute(chatModel)
@@ -1305,26 +1320,11 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			defer prepared.Body.Close()
-			w.Header().Set("Content-Type", "text/event-stream")
-			w.Header().Set("Cache-Control", "no-cache")
-			w.Header().Set("Connection", "keep-alive")
-			w.Header().Set("Access-Control-Allow-Origin", "*")
-			w.WriteHeader(http.StatusOK)
-			chatStreamToResponses(w, prepared, &reqLog, nil, params)
+			streamChatAsResponses(w, prepared, &reqLog, nil, params)
 			return
 		}
 		defer upResp.Body.Close()
-		var raw map[string]any
-		if err := json.NewDecoder(upResp.Body).Decode(&raw); err != nil {
-			finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, "decode response: "+err.Error())
-			writeOpenAIError(w, http.StatusBadGateway, "api_error", "decode response: "+err.Error())
-			return
-		}
-		out2 := normalizeOpenAIResponse(unwrapDataEnvelope(raw))
-		usage := parseTokenUsage(out2["usage"])
-		result := chatToResponsesWithRequest(out2, params)
-		finalizeResponsesNonStreamLog(&reqLog, out2, result, usage)
-		writeJSON(w, http.StatusOK, result)
+		handleResponsesChatResponse(w, upResp, &reqLog, params)
 
 	default: // cline
 		if route.Model != "" && route.Model != chatModel {
@@ -1344,13 +1344,7 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 				reqLog.AccountID = acc.AccountID
 				reqLog.AccountEmail = acc.Email
 			}
-			usage := parseTokenUsage(out["usage"])
-			if acc != nil {
-				recordTokenUsage(acc, reqLog.Model, usage)
-			}
-			result := chatToResponsesWithRequest(out, params)
-			finalizeResponsesNonStreamLog(&reqLog, out, result, usage)
-			writeJSON(w, http.StatusOK, result)
+			writeResponsesFromChat(w, out, &reqLog, acc, params)
 			return
 		}
 
@@ -1373,12 +1367,7 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 			reqLog.AccountEmail = acc.Email
 		}
 
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("Connection", "keep-alive")
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.WriteHeader(http.StatusOK)
-		chatStreamToResponses(w, upResp, &reqLog, acc, params)
+		streamChatAsResponses(w, upResp, &reqLog, acc, params)
 		return
 	}
 }

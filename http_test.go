@@ -1,9 +1,14 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestHTTPTransportUsesHTTPSProxyFromEnvironment(t *testing.T) {
@@ -29,5 +34,44 @@ func TestHTTPTransportUsesHTTPSProxyFromEnvironment(t *testing.T) {
 	}
 	if proxyURL.String() != want.String() {
 		t.Fatalf("proxy URL = %q, want %q", proxyURL, want)
+	}
+}
+
+func TestReadLimitedRequestBodyRejectsOversizedInput(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader("12345"))
+	response := httptest.NewRecorder()
+	if _, err := readLimitedRequestBody(response, request, 4); err == nil || requestBodyErrorStatus(err) != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized request error = %v", err)
+	}
+}
+
+func TestProxyRequestContextPropagatesCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	params := map[string]any{}
+	attachProxyRequestContext(params, ctx)
+	cancel()
+	select {
+	case <-proxyRequestContext(params).Done():
+	default:
+		t.Fatal("proxy request context did not propagate cancellation")
+	}
+}
+
+func TestClineUpstreamStopsWhenDownstreamContextIsCancelled(t *testing.T) {
+	oldClient := httpClient
+	httpClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		<-request.Context().Done()
+		return nil, request.Context().Err()
+	})}
+	t.Cleanup(func() { httpClient = oldClient })
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	params := map[string]any{"model": "m1", "messages": []any{map[string]any{"role": "user", "content": "hello"}}}
+	attachProxyRequestContext(params, ctx)
+	account := &Account{Email: "cancel@example.com", AccessToken: "workos:token", ExpiresAt: time.Now().Add(time.Hour).UnixMilli(), Status: "active"}
+
+	_, _, err := callClineAPIWithAccount(account, params, true)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled upstream error = %v", err)
 	}
 }

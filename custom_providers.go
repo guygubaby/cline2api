@@ -10,12 +10,14 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -40,16 +42,17 @@ type CustomProviderModel struct {
 }
 
 type CustomProvider struct {
-	ID        string                `json:"id"`
-	Name      string                `json:"name"`
-	Protocol  string                `json:"protocol"`
-	BaseURL   string                `json:"baseURL"`
-	APIKey    string                `json:"apiKey"`
-	Enabled   bool                  `json:"enabled"`
-	Headers   map[string]string     `json:"headers,omitempty"`
-	Models    []CustomProviderModel `json:"models,omitempty"`
-	CreatedAt time.Time             `json:"createdAt"`
-	UpdatedAt time.Time             `json:"updatedAt"`
+	ID                  string                `json:"id"`
+	Name                string                `json:"name"`
+	Protocol            string                `json:"protocol"`
+	BaseURL             string                `json:"baseURL"`
+	APIKey              string                `json:"apiKey"`
+	Enabled             bool                  `json:"enabled"`
+	Headers             map[string]string     `json:"headers,omitempty"`
+	AllowPrivateNetwork bool                  `json:"allowPrivateNetwork,omitempty"`
+	Models              []CustomProviderModel `json:"models,omitempty"`
+	CreatedAt           time.Time             `json:"createdAt"`
+	UpdatedAt           time.Time             `json:"updatedAt"`
 }
 
 type customProviderStoreData struct {
@@ -76,6 +79,7 @@ type customProviderRuntimeState struct {
 	LastSuccess time.Time
 	LastError   string
 	Cooldowns   map[string]time.Time
+	Latencies   map[string]*ModelLatencyStat
 }
 
 type customProviderRoute struct {
@@ -83,17 +87,112 @@ type customProviderRoute struct {
 	Model    CustomProviderModel
 }
 
-var (
-	customProvidersPath      string
-	customProviderStore      *customProviderStoreData
-	customProviderMu         sync.RWMutex
-	customProviderSaveMu     sync.Mutex
-	customProviderHTTPClient = httpClient
+type customProviderIndex struct {
+	routes map[string][]customProviderRoute
+	models []Model
+}
 
-	customProviderRuntimeMu sync.Mutex
-	customProviderRuntime   = map[string]*customProviderRuntimeState{}
-	customProviderCursors   = map[string]int{}
+var (
+	customProvidersPath          string
+	customProviderStore          *customProviderStoreData
+	customProviderMu             sync.RWMutex
+	customProviderSaveMu         sync.Mutex
+	customProviderHTTPClient     = httpClient
+	restrictedProviderHTTPClient = &http.Client{Transport: buildRestrictedProviderTransport()}
+
+	customProviderRuntimeMu  sync.Mutex
+	customProviderRuntime    = map[string]*customProviderRuntimeState{}
+	customProviderCursors    = map[string]int{}
+	customProviderIndexValue atomic.Value
 )
+
+func rebuildCustomProviderIndexLocked() {
+	index := customProviderIndex{routes: map[string][]customProviderRoute{}}
+	modelByID := map[string]Model{}
+	order := []string{}
+	for _, provider := range customProviderStore.Providers {
+		if !provider.Enabled {
+			continue
+		}
+		routeProvider := cloneCustomProvider(provider)
+		routeProvider.Models = nil
+		for _, providerModel := range provider.Models {
+			if !providerModel.Enabled || providerModel.PublicID == "" {
+				continue
+			}
+			index.routes[providerModel.PublicID] = append(index.routes[providerModel.PublicID], customProviderRoute{
+				Provider: routeProvider, Model: providerModel,
+			})
+			model, exists := modelByID[providerModel.PublicID]
+			if !exists {
+				model = Model{ID: providerModel.PublicID, Provider: provider.Name, Cost: "pass", Status: "active", Source: "custom_provider", Context: providerModel.Context, Output: providerModel.Output}
+				order = append(order, providerModel.PublicID)
+			}
+			model.ChannelCount++
+			if model.Context == 0 {
+				model.Context = providerModel.Context
+			}
+			if model.Output == 0 {
+				model.Output = providerModel.Output
+			}
+			if model.ChannelCount > 1 {
+				model.Provider = "multi-channel"
+			}
+			modelByID[providerModel.PublicID] = model
+		}
+	}
+	index.models = make([]Model, 0, len(order))
+	for _, modelID := range order {
+		index.models = append(index.models, modelByID[modelID])
+	}
+	customProviderIndexValue.Store(index)
+}
+
+func currentCustomProviderIndex() customProviderIndex {
+	loadCustomProviderStore()
+	if value := customProviderIndexValue.Load(); value != nil {
+		return value.(customProviderIndex)
+	}
+	return customProviderIndex{routes: map[string][]customProviderRoute{}}
+}
+
+func blockedProviderIP(ip net.IP) bool {
+	return ip == nil || ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() ||
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast()
+}
+
+func restrictedProviderDialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, err
+	}
+	addresses, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, fmt.Errorf("resolve provider host: %w", err)
+	}
+	for _, resolved := range addresses {
+		if blockedProviderIP(resolved.IP) {
+			continue
+		}
+		dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+		return dialer.DialContext(ctx, network, net.JoinHostPort(resolved.IP.String(), port))
+	}
+	return nil, fmt.Errorf("provider host resolves only to private or reserved addresses")
+}
+
+func buildRestrictedProviderTransport() *http.Transport {
+	transport := httpTransport.Clone()
+	transport.Proxy = nil
+	transport.DialContext = restrictedProviderDialContext
+	return transport
+}
+
+func customProviderClient(provider CustomProvider) *http.Client {
+	if customProviderHTTPClient != httpClient || provider.AllowPrivateNetwork {
+		return customProviderHTTPClient
+	}
+	return restrictedProviderHTTPClient
+}
 
 func init() {
 	customProvidersPath = configuredCustomProvidersPath()
@@ -111,7 +210,7 @@ func defaultCustomProviderStore() *customProviderStoreData {
 }
 
 func normalizeCustomProviderStore(store *customProviderStoreData) {
-	if store.Strategy != "random" && store.Strategy != "fill" {
+	if !validLoadBalancingStrategy(store.Strategy) {
 		store.Strategy = "round_robin"
 	}
 	if store.Providers == nil {
@@ -148,6 +247,7 @@ func loadCustomProviderStore() *customProviderStoreData {
 	}
 	normalizeCustomProviderStore(store)
 	customProviderStore = store
+	rebuildCustomProviderIndexLocked()
 	return customProviderStore
 }
 
@@ -183,6 +283,13 @@ func snapshotCustomProviders() (string, []CustomProvider) {
 		providers = append(providers, cloneCustomProvider(provider))
 	}
 	return customProviderStore.Strategy, providers
+}
+
+func customProviderStrategy() string {
+	loadCustomProviderStore()
+	customProviderMu.RLock()
+	defer customProviderMu.RUnlock()
+	return customProviderStore.Strategy
 }
 
 func validateCustomProvider(provider CustomProvider, requireKey bool) error {
@@ -231,6 +338,7 @@ func upsertCustomProvider(input CustomProvider) (CustomProvider, error) {
 		input.UpdatedAt = now
 		input.Models = []CustomProviderModel{}
 		customProviderStore.Providers = append(customProviderStore.Providers, input)
+		rebuildCustomProviderIndexLocked()
 		if err := saveCustomProviderStoreLocked(); err != nil {
 			return CustomProvider{}, err
 		}
@@ -255,6 +363,7 @@ func upsertCustomProvider(input CustomProvider) (CustomProvider, error) {
 		input.UpdatedAt = now
 		input.Models = append([]CustomProviderModel(nil), existing.Models...)
 		*existing = input
+		rebuildCustomProviderIndexLocked()
 		if err := saveCustomProviderStoreLocked(); err != nil {
 			return CustomProvider{}, err
 		}
@@ -272,6 +381,7 @@ func deleteCustomProvider(providerID string) error {
 			continue
 		}
 		customProviderStore.Providers = append(customProviderStore.Providers[:index], customProviderStore.Providers[index+1:]...)
+		rebuildCustomProviderIndexLocked()
 		if err := saveCustomProviderStoreLocked(); err != nil {
 			return err
 		}
@@ -284,7 +394,7 @@ func deleteCustomProvider(providerID string) error {
 }
 
 func setCustomProviderStrategy(strategy string) error {
-	if strategy != "round_robin" && strategy != "random" && strategy != "fill" {
+	if !validLoadBalancingStrategy(strategy) {
 		return fmt.Errorf("invalid provider strategy")
 	}
 	loadCustomProviderStore()
@@ -320,6 +430,7 @@ func updateCustomProviderModels(providerID string, models []CustomProviderModel)
 		}
 		provider.Models = cleaned
 		provider.UpdatedAt = time.Now()
+		rebuildCustomProviderIndexLocked()
 		return saveCustomProviderStoreLocked()
 	}
 	return fmt.Errorf("provider not found")
@@ -415,7 +526,7 @@ func syncCustomProviderModels(ctx context.Context, providerID string) (modelSync
 	if err := updateCustomProviderModels(providerID, models); err != nil {
 		return modelSyncResult{}, err
 	}
-	markCustomProviderSuccess(provider.ID, "")
+	markCustomProviderSuccess(provider.ID, "", 0)
 	return result, nil
 }
 
@@ -474,7 +585,7 @@ func (openAIProviderAdapter) ListModels(ctx context.Context, provider CustomProv
 		return nil, err
 	}
 	request.Header = providerHeaders(provider, false)
-	response, err := customProviderHTTPClient.Do(request)
+	response, err := customProviderClient(provider).Do(request)
 	if err != nil {
 		return nil, fmt.Errorf("list models: %w", err)
 	}
@@ -499,7 +610,7 @@ func (anthropicProviderAdapter) ListModels(ctx context.Context, provider CustomP
 			return nil, err
 		}
 		request.Header = providerHeaders(provider, false)
-		response, err := customProviderHTTPClient.Do(request)
+		response, err := customProviderClient(provider).Do(request)
 		if err != nil {
 			return nil, fmt.Errorf("list models: %w", err)
 		}
@@ -523,12 +634,7 @@ func (anthropicProviderAdapter) ListModels(ctx context.Context, provider CustomP
 }
 
 func (openAIProviderAdapter) Chat(ctx context.Context, provider CustomProvider, params map[string]any, stream bool) (*http.Response, error) {
-	body := make(map[string]any, len(params)+1)
-	for key, value := range params {
-		if !strings.HasPrefix(key, "_proxy_") {
-			body[key] = value
-		}
-	}
+	body := requestParamsWithoutInternalMetadata(params)
 	body["stream"] = stream
 	encoded, err := json.Marshal(body)
 	if err != nil {
@@ -539,7 +645,7 @@ func (openAIProviderAdapter) Chat(ctx context.Context, provider CustomProvider, 
 		return nil, err
 	}
 	request.Header = providerHeaders(provider, true)
-	response, err := customProviderHTTPClient.Do(request)
+	response, err := customProviderClient(provider).Do(request)
 	if err != nil {
 		return nil, fmt.Errorf("provider request: %w", err)
 	}
@@ -562,7 +668,7 @@ func (anthropicProviderAdapter) Chat(ctx context.Context, provider CustomProvide
 		return nil, err
 	}
 	request.Header = providerHeaders(provider, true)
-	response, err := customProviderHTTPClient.Do(request)
+	response, err := customProviderClient(provider).Do(request)
 	if err != nil {
 		return nil, fmt.Errorf("provider request: %w", err)
 	}
@@ -591,64 +697,20 @@ func (anthropicProviderAdapter) Chat(ctx context.Context, provider CustomProvide
 }
 
 func customProviderCatalogModels() []Model {
-	_, providers := snapshotCustomProviders()
-	byID := map[string]Model{}
-	order := []string{}
-	for _, provider := range providers {
-		if !provider.Enabled {
-			continue
-		}
-		for _, providerModel := range provider.Models {
-			if !providerModel.Enabled || providerModel.PublicID == "" {
-				continue
-			}
-			model, exists := byID[providerModel.PublicID]
-			if !exists {
-				model = Model{
-					ID: providerModel.PublicID, Provider: provider.Name, Cost: "pass",
-					Status: "active", Source: "custom_provider", Context: providerModel.Context,
-					Output: providerModel.Output,
-				}
-				order = append(order, providerModel.PublicID)
-			}
-			model.ChannelCount++
-			if model.Context == 0 {
-				model.Context = providerModel.Context
-			}
-			if model.Output == 0 {
-				model.Output = providerModel.Output
-			}
-			if model.ChannelCount > 1 {
-				model.Provider = "multi-channel"
-			}
-			byID[providerModel.PublicID] = model
-		}
-	}
-	models := make([]Model, 0, len(order))
-	for _, modelID := range order {
-		models = append(models, byID[modelID])
-	}
-	return models
+	return append([]Model(nil), currentCustomProviderIndex().models...)
 }
 
 func customProviderHasModel(publicModelID string) bool {
-	_, providers := snapshotCustomProviders()
-	for _, provider := range providers {
-		if !provider.Enabled {
-			continue
-		}
-		for _, model := range provider.Models {
-			if model.Enabled && model.PublicID == publicModelID {
-				return true
-			}
-		}
-	}
-	return false
+	return len(currentCustomProviderIndex().routes[publicModelID]) > 0
 }
 
 func customProviderModelCooling(providerID, upstreamModelID string, now time.Time) bool {
 	customProviderRuntimeMu.Lock()
 	defer customProviderRuntimeMu.Unlock()
+	return customProviderModelCoolingLocked(providerID, upstreamModelID, now)
+}
+
+func customProviderModelCoolingLocked(providerID, upstreamModelID string, now time.Time) bool {
 	state := customProviderRuntime[providerID]
 	if state == nil || state.Cooldowns == nil {
 		return false
@@ -665,31 +727,41 @@ func customProviderModelCooling(providerID, upstreamModelID string, now time.Tim
 }
 
 func customProviderRoutesForModel(publicModelID string) []customProviderRoute {
-	strategy, providers := snapshotCustomProviders()
+	strategy := customProviderStrategy()
 	now := time.Now()
-	routes := []customProviderRoute{}
-	for _, provider := range providers {
-		if !provider.Enabled {
-			continue
-		}
-		for _, model := range provider.Models {
-			if !model.Enabled || model.PublicID != publicModelID || customProviderModelCooling(provider.ID, model.ID, now) {
-				continue
-			}
-			routes = append(routes, customProviderRoute{Provider: provider, Model: model})
+	routes := append([]customProviderRoute(nil), currentCustomProviderIndex().routes[publicModelID]...)
+	customProviderRuntimeMu.Lock()
+	defer customProviderRuntimeMu.Unlock()
+	filtered := routes[:0]
+	for _, route := range routes {
+		if !customProviderModelCoolingLocked(route.Provider.ID, route.Model.ID, now) {
+			filtered = append(filtered, route)
 		}
 	}
+	routes = filtered
 	if len(routes) < 2 || strategy == "fill" {
+		return routes
+	}
+	if strategy == "least_latency" {
+		sort.SliceStable(routes, func(left, right int) bool {
+			leftLatency := customProviderRouteLatencyLocked(routes[left])
+			rightLatency := customProviderRouteLatencyLocked(routes[right])
+			if leftLatency == 0 {
+				return rightLatency != 0
+			}
+			if rightLatency == 0 {
+				return false
+			}
+			return leftLatency < rightLatency
+		})
 		return routes
 	}
 	start := 0
 	if strategy == "random" {
 		start = randIntn(len(routes))
 	} else {
-		customProviderRuntimeMu.Lock()
 		start = customProviderCursors[publicModelID] % len(routes)
 		customProviderCursors[publicModelID] = (start + 1) % len(routes)
-		customProviderRuntimeMu.Unlock()
 	}
 	ordered := make([]customProviderRoute, 0, len(routes))
 	ordered = append(ordered, routes[start:]...)
@@ -697,14 +769,32 @@ func customProviderRoutesForModel(publicModelID string) []customProviderRoute {
 	return ordered
 }
 
+func customProviderRouteLatencyLocked(route customProviderRoute) float64 {
+	state := customProviderRuntime[route.Provider.ID]
+	if state == nil {
+		return 0
+	}
+	stat := state.Latencies[route.Model.ID]
+	if stat == nil || stat.Samples == 0 {
+		return 0
+	}
+	return stat.EWMAms
+}
+
 func customProviderStateLocked(providerID string) *customProviderRuntimeState {
 	state := customProviderRuntime[providerID]
 	if state == nil {
-		state = &customProviderRuntimeState{Cooldowns: map[string]time.Time{}}
+		state = &customProviderRuntimeState{
+			Cooldowns: map[string]time.Time{},
+			Latencies: map[string]*ModelLatencyStat{},
+		}
 		customProviderRuntime[providerID] = state
 	}
 	if state.Cooldowns == nil {
 		state.Cooldowns = map[string]time.Time{}
+	}
+	if state.Latencies == nil {
+		state.Latencies = map[string]*ModelLatencyStat{}
 	}
 	return state
 }
@@ -719,7 +809,7 @@ func markCustomProviderFailure(providerID, upstreamModelID string, err error, co
 	}
 }
 
-func markCustomProviderSuccess(providerID, upstreamModelID string) {
+func markCustomProviderSuccess(providerID, upstreamModelID string, elapsed time.Duration) {
 	customProviderRuntimeMu.Lock()
 	defer customProviderRuntimeMu.Unlock()
 	state := customProviderStateLocked(providerID)
@@ -727,7 +817,44 @@ func markCustomProviderSuccess(providerID, upstreamModelID string) {
 	state.LastError = ""
 	if upstreamModelID != "" {
 		delete(state.Cooldowns, upstreamModelID)
+		stat := state.Latencies[upstreamModelID]
+		if stat == nil {
+			stat = &ModelLatencyStat{}
+			state.Latencies[upstreamModelID] = stat
+		}
+		observeModelLatency(stat, elapsed)
 	}
+}
+
+func bestAlternativeCustomProviderLatency(providerID, publicModelID string) float64 {
+	routes := currentCustomProviderIndex().routes[publicModelID]
+	customProviderRuntimeMu.Lock()
+	defer customProviderRuntimeMu.Unlock()
+	best := 0.0
+	for _, route := range routes {
+		if route.Provider.ID == providerID {
+			continue
+		}
+		state := customProviderRuntime[route.Provider.ID]
+		if state == nil {
+			continue
+		}
+		stat := state.Latencies[route.Model.ID]
+		if stat != nil && stat.Samples > 0 && stat.EWMAms > 0 && (best == 0 || stat.EWMAms < best) {
+			best = stat.EWMAms
+		}
+	}
+	return best
+}
+
+func coolSlowCustomProviderIfNeeded(providerID, upstreamModelID, publicModelID string, elapsed time.Duration) {
+	if !anomalouslySlowLatency(elapsed, bestAlternativeCustomProviderLatency(providerID, publicModelID)) {
+		return
+	}
+	customProviderRuntimeMu.Lock()
+	state := customProviderStateLocked(providerID)
+	state.Cooldowns[upstreamModelID] = time.Now().Add(slowChannelCooldown)
+	customProviderRuntimeMu.Unlock()
 }
 
 func customProviderFailureCooldown(err error) time.Duration {
@@ -745,6 +872,13 @@ func customProviderFailureCooldown(err error) time.Duration {
 }
 
 func customProviderRetryable(err error) bool {
+	if errors.Is(err, errUpstreamFirstEventTimeout) {
+		return false
+	}
+	var networkError net.Error
+	if errors.As(err, &networkError) && networkError.Timeout() {
+		return false
+	}
 	status := upstreamErrorStatus(err)
 	return status == 0 || status == http.StatusTooManyRequests || status == http.StatusUnauthorized ||
 		status == http.StatusForbidden || status >= http.StatusInternalServerError
@@ -777,6 +911,7 @@ func customProviderAdminData() map[string]any {
 		lastSuccess := ""
 		lastError := ""
 		cooldowns := map[string]string{}
+		latencies := map[string]any{}
 		if state != nil {
 			if !state.LastSuccess.IsZero() {
 				lastSuccess = state.LastSuccess.Format(time.RFC3339)
@@ -787,15 +922,23 @@ func customProviderAdminData() map[string]any {
 					cooldowns[modelID] = until.Format(time.RFC3339)
 				}
 			}
+			for modelID, latency := range state.Latencies {
+				latencies[modelID] = map[string]any{
+					"ewmaMs":  latency.EWMAms,
+					"samples": latency.Samples,
+				}
+			}
 		}
 		items = append(items, map[string]any{
 			"id": provider.ID, "name": provider.Name, "protocol": provider.Protocol,
 			"baseURL": provider.BaseURL, "enabled": provider.Enabled,
-			"hasApiKey": provider.APIKey != "", "keyPreview": customProviderKeyPreview(provider.APIKey),
+			"allowPrivateNetwork": provider.AllowPrivateNetwork,
+			"hasApiKey":           provider.APIKey != "", "keyPreview": customProviderKeyPreview(provider.APIKey),
 			"models":    provider.Models,
 			"createdAt": provider.CreatedAt, "updatedAt": provider.UpdatedAt,
 			"runtime": map[string]any{
-				"lastSuccess": lastSuccess, "lastError": lastError, "cooldowns": cooldowns,
+				"lastSuccess": lastSuccess, "lastError": lastError,
+				"cooldowns": cooldowns, "latencies": latencies,
 			},
 		})
 	}
@@ -804,22 +947,21 @@ func customProviderAdminData() map[string]any {
 
 // callCustomProviderChat is the custom-provider seam. Callers always send and
 // receive OpenAI Chat Completions semantics; protocol-specific behavior stays
-// behind the selected adapter.
+// behind the selected adapter. Streaming responses have already passed semantic
+// preflight so callers can forward or transform them without parsing twice.
 func callCustomProviderChat(ctx context.Context, params map[string]any, stream bool) (*http.Response, *CustomProvider, int, error) {
 	publicModelID, _ := params["model"].(string)
 	routes := customProviderRoutesForModel(publicModelID)
 	if len(routes) == 0 {
 		return nil, nil, 0, newUpstreamHTTPError(http.StatusTooManyRequests, "all custom provider channels for this model are cooling down")
 	}
-	attempts := len(routes)
-	if attempts > customProviderMaxAttempts {
-		attempts = customProviderMaxAttempts
-	}
+	attemptLimit := min(len(routes), customProviderMaxAttempts)
 	var lastErr error
 	var lastProvider *CustomProvider
-	attempted := 0
-	for attempt := 0; attempt < attempts; attempt++ {
-		attempted++
+	lastRetryCount := 0
+	callStarted := time.Now()
+	for attempt := 0; attempt < attemptLimit; attempt++ {
+		lastRetryCount = attempt
 		route := routes[attempt]
 		provider := route.Provider
 		lastProvider = &provider
@@ -832,6 +974,7 @@ func callCustomProviderChat(ctx context.Context, params map[string]any, stream b
 			upstreamParams[key] = value
 		}
 		upstreamParams["model"] = route.Model.ID
+		attemptStarted := time.Now()
 		response, err := adapter.Chat(ctx, provider, upstreamParams, stream)
 		if err == nil {
 			response, err = rewriteCustomProviderResponseModel(response, publicModelID, stream)
@@ -846,17 +989,22 @@ func callCustomProviderChat(ctx context.Context, params map[string]any, stream b
 			}
 		}
 		if err == nil {
-			markCustomProviderSuccess(provider.ID, route.Model.ID)
+			elapsed := time.Duration(0)
+			if stream {
+				elapsed = time.Since(attemptStarted)
+				recordUpstreamTTFT(params, time.Since(callStarted))
+				coolSlowCustomProviderIfNeeded(provider.ID, route.Model.ID, publicModelID, elapsed)
+			}
+			markCustomProviderSuccess(provider.ID, route.Model.ID, elapsed)
 			return response, lastProvider, attempt, nil
 		}
 		lastErr = err
-		cooldown := customProviderFailureCooldown(err)
-		markCustomProviderFailure(provider.ID, route.Model.ID, err, cooldown)
+		markCustomProviderFailure(provider.ID, route.Model.ID, err, customProviderFailureCooldown(err))
 		if !customProviderRetryable(err) {
 			break
 		}
 	}
-	return nil, lastProvider, attempted - 1, lastErr
+	return nil, lastProvider, lastRetryCount, lastErr
 }
 
 func rewriteCustomProviderResponseModel(response *http.Response, publicModelID string, stream bool) (*http.Response, error) {

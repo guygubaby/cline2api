@@ -3,6 +3,7 @@
 .cline-request-logs.json
 .cline-zen.json
 .cline-providers.json
+.env
 cline-proxy
 cline-proxy.exe
 cline-proxy.exe~

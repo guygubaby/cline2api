@@ -23,7 +23,7 @@ Cline2API 是 Cline API 的反向代理服务，支持多账号轮询、OpenAI �
 ## 功能
 
 - **双协议兼容**：同时支持 `/v1/chat/completions`（OpenAI）和 `/v1/messages`（Anthropic Messages API）
-- **多账号轮询**：自动在多个 Cline 账号间切换负载（`round_robin` / `fill` / `random` 策略）
+- **多账号轮询**：自动在多个 Cline 账号间切换负载（`round_robin` / `fill` / `random` / `least_latency` 策略）
 - **中英文管理后台**：浏览器访问 `/admin/` 管理账号、API Key、模型配置、请求头、代理设置；自动跟随浏览器语言，侧栏可手动切换
 - **动态模型同步**：启动时自动拉取 Cline 官方推荐模型接口（免费/订阅模型），模型变化时弹窗提示，也可在后台手动「从 Cline 同步模型」
 - **第三方渠道管理**：接入 OpenAI Chat Completions 或 Anthropic Messages 兼容上游，同步/映射模型，并在支持同一公开模型的渠道间负载均衡
@@ -93,7 +93,9 @@ Model:    z-ai/glm-5.3-flash
 
 ### 第三方渠道
 
-管理后台的 **渠道管理** 页面可以添加渠道名称、协议、Base URL 和 API Key。保存后可从上游 `/models` 同步模型，也可以手动添加上游 Model ID，并为每个模型设置公开 Model ID。多个启用渠道映射到同一个公开 Model ID 时，会按轮询、填满或随机策略选择；429、认证失败、网络错误和 5xx 会短暂冷却当前渠道，并在响应尚未开始时最多切换一次其他渠道。
+管理后台的 **渠道管理** 页面可以添加渠道名称、协议、Base URL 和 API Key。保存后可从上游 `/models` 同步模型，也可以手动添加上游 Model ID，并为每个模型设置公开 Model ID。多个启用渠道映射到同一个公开 Model ID 时，可按轮询、填满、随机或最低延迟策略选择；系统用 EWMA 学习各模型渠道的首事件延迟，异常慢于已知替代渠道时会短暂冷却。429、认证失败、网络错误和 5xx 同样会触发冷却，并在响应尚未开始时最多切换一次其他渠道。渠道默认禁止访问回环、私网、链路本地和云元数据地址；只有可信内网 Provider 才应显式开启“私网访问”。
+
+设置页还可以选择 Anthropic thinking 请求的默认 `low` / `medium` / `high` effort；请求显式提供 effort 时始终以请求为准，`thinking.type=disabled` 不会再被转换成高推理模式。请求日志分别展示上游首事件、thinking 首字、可见正文首字与缓存命中状态。
 
 OpenAI 渠道当前使用 `/chat/completions`，Anthropic 渠道使用 `/messages`；两种上游都会被归一化，因此下游仍可使用 Chat Completions、Responses 或 Anthropic Messages。
 
@@ -142,7 +144,7 @@ DeepSeek 的客户端非流式请求会在 Cline 上游使用 SSE，再聚合为
 
 Usage 元数据按各协议的标准字段返回：OpenAI Chat 使用 `prompt_tokens` / `completion_tokens` / `total_tokens`，Responses 使用 `input_tokens` / `output_tokens` 及 cache/reasoning details，Anthropic 使用独立的 input、cache read、cache creation、output 与 thinking counters。由于 Cline 上游只在流结束时给出真实 usage，Anthropic `message_start` 的 input 是本地预估值，最终 `message_delta` 会返回真实明细；这可兼顾 Claude Code session log 的上下文显示与实时 TTFT。
 
-Anthropic 流式转换会把 Cline/DeepSeek 的 `reasoning_content` 立即输出为标准 `thinking` block，并在后续工具调用历史中恢复为上游要求的 reasoning。只有 reasoning、正文和工具调用全部为空时才最多换一个账号重试一次；30 秒没有任何语义事件时会对该账号当前模型短暂冷却。仍为空时返回不可重试的 `400 invalid_request_error`，提示客户端执行 `/compact` 或 `/clear`；相同请求的 SHA-256 指纹会短时熔断，避免重试风暴，指纹不保存会话内容。
+Anthropic 流式转换会把 Cline/DeepSeek 的 `reasoning_content` 立即输出为标准 `thinking` block，并在后续工具调用历史中恢复为上游要求的 reasoning。reasoning、正文和工具调用全部为空时，会按策略尝试最多 3 个不同账号，并对返回空结果的“账号 + 模型”短暂冷却。全部失败后，只有估算输入接近模型上下文上限时才返回 `400 invalid_request_error` 并提示 `/compact`；短上下文返回 `529 overloaded_error`、`Retry-After` 和 `upstream_empty_response` 日志错误码，提示稍后重试或切换模型/渠道。相同请求的 SHA-256 指纹仍会短时熔断，避免重试风暴且不保存会话内容。
 
 `GET /v1/models` 在收到 `anthropic-version` 请求头时返回 Anthropic Models 标准结构，包括 `max_input_tokens` 与 `max_tokens`；OpenAI 请求仍保持其标准的基础 Model 对象，不添加非标准 context 字段。
 
@@ -161,7 +163,7 @@ Anthropic 流式转换会把 Cline/DeepSeek 的 `reasoning_content` 立即输出
 默认只监听 `127.0.0.1`（仅本机可访问）。管理后台 **访问设置** 区可：
 
 - **监听地址下拉选择**：`127.0.0.1`（仅本机）/ `0.0.0.0`（所有网卡）/ 本机检测到的 IP，保存后自动重启监听立即生效，选择会自动检测并展示本机 IP 列表
-- **管理后台密码**：默认无密码；设置后访问 `/admin/` 需输入密码登录（会话 Cookie，24 小时有效），留空保存可清除密码
+- **管理后台密码**：回环访问默认可无密码；非回环访问必须设置密码（会话 Cookie，24h）。Docker/服务器部署请通过 `CLINE_ADMIN_PASSWORD` 设置初始密码
 
 命令行也可指定监听地址（优先级：环境变量 > 后台设置 > `127.0.0.1`）：
 
@@ -240,6 +242,19 @@ Docker Compose 对已有状态文件使用 bind mount，并用自动创建的 `p
 touch .cline-accounts.json .cline-request-logs.json .cline-zen.json override.md
 chmod 600 .cline-accounts.json .cline-request-logs.json .cline-zen.json
 ```
+
+启动前通过 `.env` 设置管理密码；Docker Compose 会自动读取该文件。未设置时远程管理接口会返回 `403`，公共代理接口不受影响：
+
+```bash
+cp .env.example .env
+chmod 600 .env
+# 编辑 .env，将 CLINE_ADMIN_PASSWORD 设置为密码管理器生成的强密码
+docker compose up -d --build
+```
+
+`CLINE_ADMIN_PASSWORD` 只在尚未保存管理密码时用于初始化。初始化后密码以 Argon2id 哈希保存；修改 `.env` 不会覆盖现有密码，后续请在管理后台修改。不要提交 `.env`。
+
+只有受信任的隔离网络才可临时设置 `CLINE_ALLOW_INSECURE_ADMIN=true` 绕过远程密码要求。
 
 程序优先使用临时文件原子替换；若 Docker 单文件挂载拒绝 `rename`，会自动回退为同步写入挂载文件，确保账号、API Key、Zen 配置与请求日志重启后不会回退。
 

@@ -23,7 +23,7 @@ Cline2API is a reverse proxy for the Cline API with multi-account rotation, dual
 ## Features
 
 - **Dual protocol**: serves both `/v1/chat/completions` (OpenAI) and `/v1/messages` (Anthropic Messages API)
-- **Multi-account rotation**: load-balances across Cline accounts (`round_robin` / `fill` / `random`)
+- **Multi-account rotation**: load-balances across Cline accounts (`round_robin` / `fill` / `random` / `least_latency`)
 - **Bilingual admin panel**: `/admin/` manages accounts, API keys, models, headers and proxy settings; auto-follows your browser language, manually switchable in the sidebar
 - **Dynamic model sync**: fetches the official Cline recommended-models API on startup (free / cline-pass / recommended); a popup notifies you when the model list changes, and you can also click "Sync Models from Cline" in the panel anytime
 - **Custom provider management**: connect OpenAI Chat Completions or Anthropic Messages-compatible upstreams, sync/map their models, and load-balance channels that serve the same public model
@@ -92,7 +92,9 @@ Both OpenAI and Anthropic API formats are supported.
 
 ### Custom providers
 
-The **Providers** page in the admin panel accepts a provider name, protocol, Base URL, and API key. You can sync models from the upstream `/models` endpoint or add an upstream model ID manually, then assign each one a public model ID. When multiple enabled providers map to the same public model ID, the proxy selects them using round-robin, fill, or random strategy. A channel is briefly cooled after a 429, authentication failure, network error, or 5xx, and the proxy switches to at most one alternate channel before a response begins.
+The **Providers** page in the admin panel accepts a provider name, protocol, Base URL, and API key. You can sync models from the upstream `/models` endpoint or add an upstream model ID manually, then assign each one a public model ID. When multiple enabled providers map to the same public model ID, the proxy can use round-robin, fill, random, or least-latency selection. It learns first-event latency per model/channel with an EWMA and briefly cools a channel when it is anomalously slower than a known alternative. A 429, authentication failure, network error, or 5xx also triggers cooldown, and the proxy switches to at most one alternate channel before a response begins. Loopback, private, link-local, and cloud-metadata addresses are blocked by default; enable private-network access only for an upstream on a trusted internal network.
+
+The Settings page also lets you choose the default `low`, `medium`, or `high` effort for Anthropic thinking requests. An explicit request effort always wins, and `thinking.type=disabled` is no longer converted into high reasoning. Request logs show upstream first event, thinking first token, visible first token, and cache-hit state separately.
 
 OpenAI providers currently use `/chat/completions`; Anthropic providers use `/messages`. Both are normalized internally, so downstream clients may continue using Chat Completions, Responses, or Anthropic Messages.
 
@@ -141,7 +143,7 @@ For client-side non-streaming DeepSeek requests, the Cline upstream is called wi
 
 Usage metadata follows each protocol's standard fields: OpenAI Chat uses `prompt_tokens` / `completion_tokens` / `total_tokens`; Responses uses `input_tokens` / `output_tokens` plus cache and reasoning details; Anthropic reports fresh input, cache read, cache creation, output, and thinking counters separately. Because the Cline upstream only reports exact usage at the end of a stream, Anthropic `message_start` carries a local input estimate while the final `message_delta` carries the exact breakdown. This preserves real-time TTFT while allowing Claude Code session logs to show context usage.
 
-Anthropic streaming immediately maps Cline/DeepSeek `reasoning_content` to standard `thinking` blocks and restores it to the upstream-required reasoning history after tool calls. A retry happens only when reasoning, visible text, and tool calls are all absent; an account that produces no semantic event for 30 seconds is briefly cooled down for that model. A second empty result returns a non-retryable `400 invalid_request_error` with `/compact` or `/clear` guidance; an opaque SHA-256 request fingerprint is briefly circuit-broken to prevent retry storms without storing conversation content.
+Anthropic streaming immediately maps Cline/DeepSeek `reasoning_content` to standard `thinking` blocks and restores it to the upstream-required reasoning history after tool calls. When reasoning, visible text, and tool calls are all absent, the proxy tries up to three distinct accounts according to the configured strategy and briefly cools each empty “account + model” route. If every attempt is empty, only input estimated near the model context limit gets a `400 invalid_request_error` with `/compact` guidance. Short-context failures return `529 overloaded_error`, `Retry-After`, and the `upstream_empty_response` request-log code, suggesting a later retry or another model/channel. The opaque SHA-256 request fingerprint remains briefly circuit-broken without storing conversation content.
 
 `GET /v1/models` returns the Anthropic Models shape, including `max_input_tokens` and `max_tokens`, when the request includes `anthropic-version`. OpenAI requests keep the standard basic Model object without non-standard context fields.
 
@@ -160,7 +162,7 @@ Create `override.md` next to the executable; its content replaces the system pro
 By default the proxy listens on `127.0.0.1` (local only). The **Access Settings** section of the admin panel lets you:
 
 - **Choose a listen address**: `127.0.0.1` (local) / `0.0.0.0` (all interfaces) / detected local IPs; saving restarts the listener immediately
-- **Admin password**: none by default; once set, `/admin/` requires a password (session cookie, 24h); save an empty field to clear it
+- **Admin password**: loopback access may be passwordless; non-loopback access requires a password (24h session cookie). Set the initial password with `CLINE_ADMIN_PASSWORD` for Docker/server deployments
 
 You can also set the listen address on the command line (priority: env var > panel setting > `127.0.0.1`):
 
@@ -234,6 +236,19 @@ Docker Compose keeps the existing state files as bind mounts and stores custom-p
 touch .cline-accounts.json .cline-request-logs.json .cline-zen.json override.md
 chmod 600 .cline-accounts.json .cline-request-logs.json .cline-zen.json
 ```
+
+Set the admin password in `.env` before startup; Docker Compose loads this file automatically. Without it, remote admin endpoints return `403` while public proxy endpoints remain available:
+
+```bash
+cp .env.example .env
+chmod 600 .env
+# Edit .env and set CLINE_ADMIN_PASSWORD to a strong password-manager value.
+docker compose up -d --build
+```
+
+`CLINE_ADMIN_PASSWORD` is used only to initialize an admin password when none has been saved. The initialized password is stored as an Argon2id hash; changing `.env` will not overwrite it, so use the admin panel for later password changes. Never commit `.env`.
+
+Use `CLINE_ALLOW_INSECURE_ADMIN=true` only as an explicit temporary override on an isolated trusted network.
 
 The application prefers atomic temp-file replacement. If Docker rejects `rename` over a file bind mount, it automatically falls back to a synced direct write so accounts, API keys, Zen settings, and request logs survive restarts.
 

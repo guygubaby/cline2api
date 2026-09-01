@@ -16,12 +16,30 @@ import (
 )
 
 const (
-	proxyRequestIDParamKey     = "_cline2api_request_id"
-	proxyTenantScopeParamKey   = "_cline2api_tenant_scope"
-	proxyUpstreamTaskParamKey  = "_cline2api_upstream_task_id"
-	proxyUpstreamCountParamKey = "_cline2api_upstream_attempt_count"
-	responseAuditPrefixBytes   = 64 << 10
+	proxyRequestIDParamKey      = "_cline2api_request_id"
+	proxyTenantScopeParamKey    = "_cline2api_tenant_scope"
+	proxyUpstreamTaskParamKey   = "_cline2api_upstream_task_id"
+	proxyUpstreamCountParamKey  = "_cline2api_upstream_attempt_count"
+	proxyUpstreamTTFTParamKey   = "_cline2api_upstream_ttft_ms"
+	proxyRequestContextParamKey = "_cline2api_request_context"
+	proxyAuditHashParamKey      = "_cline2api_audit_hash"
+	responseAuditPrefixBytes    = 64 << 10
 )
+
+func attachProxyRequestContext(params map[string]any, ctx context.Context) {
+	if params != nil && ctx != nil {
+		params[proxyRequestContextParamKey] = ctx
+	}
+}
+
+func proxyRequestContext(params map[string]any) context.Context {
+	if params != nil {
+		if ctx, ok := params[proxyRequestContextParamKey].(context.Context); ok && ctx != nil {
+			return ctx
+		}
+	}
+	return context.Background()
+}
 
 type tenantScopeContextKey struct{}
 
@@ -136,7 +154,12 @@ func proxyRequestAuditFields(params map[string]any) (string, string) {
 		requestID = newProxyRequestID()
 		params[proxyRequestIDParamKey] = requestID
 	}
-	return requestID, canonicalRequestAuditHash(params)
+	hashValue, _ := params[proxyAuditHashParamKey].(string)
+	if hashValue == "" {
+		hashValue = canonicalRequestAuditHash(params)
+		params[proxyAuditHashParamKey] = hashValue
+	}
+	return requestID, hashValue
 }
 
 func recordUpstreamAttempt(params map[string]any, taskID string) {

@@ -14,6 +14,7 @@ import (
 )
 
 func main() {
+	defer flushRuntimeState()
 	loginMode := flag.Bool("login", false, "Run OAuth device login flow and add account to pool")
 	captureMode := flag.Bool("capture", false, "Run interactive OAuth capture (records ALL traffic)")
 	port := flag.Int("port", 3457, "Proxy server port")

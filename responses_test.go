@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -303,7 +304,7 @@ func TestChatStreamToResponsesForwardsReasoningSummary(t *testing.T) {
 	}, "\n")
 	upstream := &http.Response{Body: io.NopCloser(strings.NewReader(upstreamBody))}
 	recorder := httptest.NewRecorder()
-	reqLog := &RequestLog{StartedAt: time.Now(), Protocol: "responses", Model: "m1", Stream: true}
+	reqLog := &RequestLog{StartedAt: time.Now().Add(-time.Second), Protocol: "responses", Model: "m1", Stream: true}
 
 	chatStreamToResponses(recorder, upstream, reqLog, nil)
 	events := decodeSSEEvents(t, recorder.Body.String())
@@ -316,6 +317,9 @@ func TestChatStreamToResponsesForwardsReasoningSummary(t *testing.T) {
 	outputs := response["output"].([]any)
 	if len(outputs) != 2 || outputs[0].(map[string]any)["type"] != "reasoning" || outputs[1].(map[string]any)["type"] != "message" {
 		t.Fatalf("reasoning/message output order = %#v", outputs)
+	}
+	if reqLog.UpstreamTTFTMs <= 0 || reqLog.ThinkingTTFTMs <= 0 || reqLog.VisibleTTFTMs <= 0 {
+		t.Fatalf("response latency phases = %#v", reqLog)
 	}
 }
 
@@ -505,7 +509,7 @@ func TestResponsesStreamMapsRepeatedInitializationRateLimit(t *testing.T) {
 	}
 }
 
-func TestResponsesStreamRetriesFirstEventTimeoutAndCoolsDownSlowAccount(t *testing.T) {
+func TestResponsesStreamStopsAfterFirstEventTimeoutAndCoolsDownSlowAccount(t *testing.T) {
 	firstAccount := &Account{
 		AccountID: "responses-slow", Email: "slow@example.com", AccessToken: "workos:slow",
 		ExpiresAt: time.Now().Add(time.Hour).UnixMilli(), Status: "active", ModelCooldowns: map[string]time.Time{},
@@ -553,11 +557,13 @@ func TestResponsesStreamRetriesFirstEventTimeoutAndCoolsDownSlowAccount(t *testi
 		"model": model, "stream": true,
 		"messages": []any{map[string]any{"role": "user", "content": "hello"}},
 	}, 20*time.Millisecond)
-	if err != nil {
-		t.Fatalf("retry Responses stream: %v", err)
+	if !errors.Is(err, errUpstreamFirstEventTimeout) {
+		t.Fatalf("Responses timeout = %v", err)
 	}
-	defer response.Body.Close()
-	if requestCount != 2 || account != secondAccount || retryCount != 1 {
+	if response != nil {
+		response.Body.Close()
+	}
+	if requestCount != 1 || account != firstAccount || retryCount != 0 {
 		t.Fatalf("retry result: requests=%d account=%#v retries=%d", requestCount, account, retryCount)
 	}
 	if until := firstAccount.ModelCooldowns[model]; !until.After(time.Now()) {

@@ -21,6 +21,7 @@ import (
 const defaultDesktopPort = 3457
 
 func main() {
+	defer flushRuntimeState()
 	selfCheck := flag.Bool("selfcheck", false, "Start embedded proxy, wait for /health, and exit")
 	port := flag.Int("port", configuredDesktopPort(), "Proxy server port")
 	host := flag.String("host", configuredDesktopHost(), "Proxy server listen host (0.0.0.0 = all interfaces)")
@@ -104,7 +105,8 @@ func runDesktopWindow(port int) error {
 			Handler: desktopRedirectHandler(port),
 		},
 		BackgroundColour: &options.RGBA{R: 248, G: 250, B: 252, A: 255},
-		OnStartup:       func(_ context.Context) {},
+		OnStartup:        func(_ context.Context) {},
+		OnShutdown:       func(_ context.Context) { flushRuntimeState() },
 		Windows: &windows.Options{
 			WebviewIsTransparent: false,
 			WindowIsTranslucent:  false,
