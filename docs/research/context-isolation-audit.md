@@ -1,7 +1,7 @@
 # Context isolation audit
 
-Date: 2026-09-01  
-Scope: Claude Code -> `cline2api` -> Cline Chat Completions -> `deepseek/deepseek-v4-flash`  
+Date: 2026-09-01
+Scope: Claude Code -> `cline2api` -> Cline Chat Completions -> `deepseek/deepseek-v4-flash`
 Method: local session evidence, current repository source/tests, and first-party Anthropic/Cline documentation. No production code was changed.
 
 ## Executive conclusion
