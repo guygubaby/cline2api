@@ -96,6 +96,8 @@ The **Providers** page in the admin panel accepts a provider name, protocol, Bas
 
 The Settings page also lets you choose the default `low`, `medium`, or `high` effort for Anthropic thinking requests. An explicit request effort always wins, and `thinking.type=disabled` is no longer converted into high reasoning. Request logs show upstream first event, thinking first token, visible first token, and cache-hit state separately.
 
+For non-streaming lightweight auxiliary requests to DeepSeek V4 and GLM 5.3 (at most 256 output tokens, no tools, and no explicit thinking/reasoning request), the proxy disables thinking so title or summary tasks do not spend their entire output budget on reasoning. Large tasks, client-streamed requests, and explicit reasoning requests are unchanged.
+
 OpenAI providers currently use `/chat/completions`; Anthropic providers use `/messages`. Both are normalized internally, so downstream clients may continue using Chat Completions, Responses, or Anthropic Messages.
 
 ### API protocol compatibility

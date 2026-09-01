@@ -97,6 +97,8 @@ Model:    z-ai/glm-5.3-flash
 
 设置页还可以选择 Anthropic thinking 请求的默认 `low` / `medium` / `high` effort；请求显式提供 effort 时始终以请求为准，`thinking.type=disabled` 不会再被转换成高推理模式。请求日志分别展示上游首事件、thinking 首字、可见正文首字与缓存命中状态。
 
+对 DeepSeek V4 和 GLM 5.3 的非流式轻量辅助请求（不超过 256 输出 token、无工具、未显式要求 thinking/reasoning），代理会关闭 thinking，避免标题或摘要任务把全部输出预算消耗在 reasoning。大任务、客户端流式请求和显式推理请求不受影响。
+
 OpenAI 渠道当前使用 `/chat/completions`，Anthropic 渠道使用 `/messages`；两种上游都会被归一化，因此下游仍可使用 Chat Completions、Responses 或 Anthropic Messages。
 
 ### API 协议兼容

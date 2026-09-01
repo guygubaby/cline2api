@@ -716,6 +716,10 @@ func integerTokenLimit(value any) (int, bool) {
 	}
 }
 
+func supportsThinkingToggle(model string) bool {
+	return strings.Contains(model, "deepseek-v4") || strings.HasPrefix(model, "z-ai/glm-5.3")
+}
+
 func buildUpstreamBody(params map[string]any, stream bool, sessionID string) map[string]any {
 	maxTokens := defaultMaxTokens
 	if value, ok := integerTokenLimit(params["max_tokens"]); ok {
@@ -767,7 +771,7 @@ func buildUpstreamBody(params map[string]any, stream bool, sessionID string) map
 	}
 	_, explicitThinking := params["thinking"]
 	clientStream, _ := params["stream"].(bool)
-	if strings.Contains(model, "deepseek-v4") && !clientStream && maxTokens <= smallAuxiliaryMaxTokens && !hasTools && !explicitReasoning && !explicitThinking {
+	if supportsThinkingToggle(model) && !clientStream && maxTokens <= smallAuxiliaryMaxTokens && !hasTools && !explicitReasoning && !explicitThinking {
 		body["thinking"] = map[string]any{"type": "disabled"}
 	}
 

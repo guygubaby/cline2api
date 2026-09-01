@@ -21,21 +21,25 @@ func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error)
 }
 
 func TestBuildUpstreamBodyDisablesThinkingForSmallAuxiliaryCompletion(t *testing.T) {
-	body := buildUpstreamBody(map[string]any{
-		"model":      "deepseek/deepseek-v4-flash",
-		"max_tokens": float64(64),
-		"stream":     false,
-		"messages": []any{
-			map[string]any{"role": "user", "content": "Return one short title."},
-		},
-	}, true, "test-session")
+	for _, model := range []string{"deepseek/deepseek-v4-flash", "z-ai/glm-5.3-flash"} {
+		t.Run(model, func(t *testing.T) {
+			body := buildUpstreamBody(map[string]any{
+				"model":      model,
+				"max_tokens": float64(60),
+				"stream":     false,
+				"messages": []any{
+					map[string]any{"role": "user", "content": "Return one short title."},
+				},
+			}, true, "test-session")
 
-	thinking, _ := body["thinking"].(map[string]any)
-	if thinking["type"] != "disabled" {
-		t.Fatalf("small auxiliary completion should disable thinking: %#v", body)
-	}
-	if _, ok := body["reasoning_effort"]; ok {
-		t.Fatalf("unspecified reasoning_effort should not be injected: %#v", body)
+			thinking, _ := body["thinking"].(map[string]any)
+			if thinking["type"] != "disabled" {
+				t.Fatalf("small auxiliary completion should disable thinking: %#v", body)
+			}
+			if _, ok := body["reasoning_effort"]; ok {
+				t.Fatalf("unspecified reasoning_effort should not be injected: %#v", body)
+			}
+		})
 	}
 }
 
@@ -85,6 +89,48 @@ func TestShouldForceClineStreamOnlyForNonStreamingDeepSeek(t *testing.T) {
 	}
 	if !shouldForceClineStream(map[string]any{"model": "z-ai/glm-5.3-flash"}, false) {
 		t.Fatal("GLM 5.3 requests should aggregate a reliable upstream stream")
+	}
+}
+
+func TestClineGLMSmallAuxiliaryRequestDisablesThinkingUpstream(t *testing.T) {
+	account := &Account{
+		AccountID: "glm-small", Email: "glm-small@example.com", AccessToken: "workos:glm-small",
+		ExpiresAt: time.Now().Add(time.Hour).UnixMilli(), Status: "active", ModelCooldowns: map[string]time.Time{},
+	}
+	oldHTTPClient := httpClient
+	requestCount := 0
+	httpClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requestCount++
+		var body map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			return nil, err
+		}
+		thinking, _ := body["thinking"].(map[string]any)
+		if thinking["type"] != "disabled" || body["max_tokens"] != float64(60) || body["stream"] != true {
+			t.Fatalf("GLM auxiliary upstream body = %#v", body)
+		}
+		stream := strings.Join([]string{
+			`data: {"model":"z-ai/glm-5.3-flash","choices":[{"delta":{"content":"short title"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}`,
+			`data: [DONE]`,
+			``,
+		}, "\n")
+		return &http.Response{
+			StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body: io.NopCloser(strings.NewReader(stream)), Request: request,
+		}, nil
+	})}
+	t.Cleanup(func() { httpClient = oldHTTPClient })
+
+	result, _, err := callClineAPIWithAccount(account, map[string]any{
+		"model": "z-ai/glm-5.3-flash", "max_tokens": float64(60), "stream": false,
+		"messages": []any{map[string]any{"role": "user", "content": "Return a short title."}},
+	}, true)
+	if err != nil {
+		t.Fatalf("GLM auxiliary request: %v", err)
+	}
+	defer result.Body.Close()
+	if requestCount != 1 {
+		t.Fatalf("upstream requests = %d, want 1", requestCount)
 	}
 }
 
@@ -214,18 +260,49 @@ func TestCallClineNonStreamRetriesOneAlternativeAfterEmptyStream(t *testing.T) {
 }
 
 func TestBuildUpstreamBodyPreservesExplicitReasoning(t *testing.T) {
-	body := buildUpstreamBody(map[string]any{
-		"model":            "deepseek/deepseek-v4-flash",
-		"max_tokens":       float64(64),
-		"reasoning_effort": "high",
-		"messages":         []any{map[string]any{"role": "user", "content": "Think carefully."}},
-	}, false, "test-session")
+	for _, model := range []string{"deepseek/deepseek-v4-flash", "z-ai/glm-5.3-flash"} {
+		body := buildUpstreamBody(map[string]any{
+			"model":            model,
+			"max_tokens":       float64(64),
+			"reasoning_effort": "high",
+			"messages":         []any{map[string]any{"role": "user", "content": "Think carefully."}},
+		}, false, "test-session")
 
-	if body["reasoning_effort"] != "high" {
-		t.Fatalf("explicit reasoning_effort was not preserved: %#v", body)
+		if body["reasoning_effort"] != "high" {
+			t.Fatalf("explicit reasoning_effort was not preserved for %s: %#v", model, body)
+		}
+		if _, ok := body["thinking"]; ok {
+			t.Fatalf("explicit reasoning request should not be disabled for %s: %#v", model, body)
+		}
 	}
-	if _, ok := body["thinking"]; ok {
-		t.Fatalf("explicit reasoning request should not be disabled: %#v", body)
+}
+
+func TestBuildUpstreamBodyKeepsGLMThinkingForLargeOrClientStreamRequests(t *testing.T) {
+	for _, testCase := range []struct {
+		name   string
+		params map[string]any
+	}{
+		{
+			name: "large task",
+			params: map[string]any{
+				"model": "z-ai/glm-5.3-flash", "max_tokens": float64(32_000), "stream": false,
+				"messages": []any{map[string]any{"role": "user", "content": "Implement a large task."}},
+			},
+		},
+		{
+			name: "client stream",
+			params: map[string]any{
+				"model": "z-ai/glm-5.3-flash", "max_tokens": float64(60), "stream": true,
+				"messages": []any{map[string]any{"role": "user", "content": "Stream a short answer."}},
+			},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			body := buildUpstreamBody(testCase.params, true, "test-session")
+			if _, disabled := body["thinking"]; disabled {
+				t.Fatalf("GLM thinking was changed outside the auxiliary path: %#v", body)
+			}
+		})
 	}
 }
 
