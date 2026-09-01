@@ -295,6 +295,21 @@ func TestChatStreamToResponsesFailsOnEarlyEOF(t *testing.T) {
 	}
 }
 
+func TestChatStreamToResponsesStopsRunawayRepeatedText(t *testing.T) {
+	upstream := &http.Response{Body: io.NopCloser(strings.NewReader(repetitiveChatSSE(t, 64)))}
+	recorder := httptest.NewRecorder()
+	reqLog := &RequestLog{StartedAt: time.Now(), Protocol: "responses", Model: "m1", Stream: true}
+
+	chatStreamToResponses(recorder, upstream, reqLog, nil)
+
+	events := decodeSSEEvents(t, recorder.Body.String())
+	failed := firstEventOfType(t, events, "response.failed")
+	errorBody := failed["response"].(map[string]any)["error"].(map[string]any)
+	if errorBody["code"] != repetitiveOutputErrorCode || reqLog.ErrorCode != repetitiveOutputErrorCode || reqLog.Completed {
+		t.Fatalf("runaway Responses stream was not failed safely: error=%#v log=%#v", errorBody, reqLog)
+	}
+}
+
 func TestChatStreamToResponsesForwardsReasoningSummary(t *testing.T) {
 	upstreamBody := strings.Join([]string{
 		`data: {"model":"m1","choices":[{"delta":{"reasoning_content":"reasoning now"}}]}`,

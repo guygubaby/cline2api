@@ -1389,6 +1389,8 @@ func handleStreamResponse(w http.ResponseWriter, upstream *http.Response, acc *A
 	sawDone := false
 	hasOutput := false
 	var streamFailure error
+	var visibleRepetition outputRepetitionGuard
+	var reasoningRepetition outputRepetitionGuard
 	for {
 		line, readErr := reader.ReadString('\n')
 		if line != "" {
@@ -1418,6 +1420,14 @@ func handleStreamResponse(w http.ResponseWriter, upstream *http.Response, acc *A
 					rawDelta, _ := getNested(obj, "choices", 0, "delta").(map[string]any)
 					if rawDelta == nil {
 						rawDelta, _ = getNested(obj, "choices", 0, "message").(map[string]any)
+					}
+					if content, _ := rawDelta["content"].(string); visibleRepetition.Observe(content) {
+						streamFailure = errRepetitiveOutput
+						break
+					}
+					if reasoningRepetition.Observe(reasoningContent(rawDelta)) {
+						streamFailure = errRepetitiveOutput
+						break
 					}
 					recordRequestLatencyPhases(reqLog, eventAt, reasoningContent(rawDelta) != "", false)
 
@@ -2618,6 +2628,8 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 	var latestUsage tokenUsage
 	var latestRawUsage map[string]any
 	var firstOutputAt time.Time
+	var visibleRepetition outputRepetitionGuard
+	var reasoningRepetition outputRepetitionGuard
 
 	for {
 		line, err := reader.ReadString('\n')
@@ -2682,6 +2694,15 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 		reasoning := reasoningContent(delta)
 		content, _ := delta["content"].(string)
 		toolCalls, _ := delta["tool_calls"].([]any)
+		if visibleRepetition.Observe(content) || reasoningRepetition.Observe(reasoning) {
+			streamFailure = errRepetitiveOutput
+			reqLog.ErrorCode = repetitiveOutputErrorCode
+			emit("error", map[string]any{
+				"type":  "error",
+				"error": map[string]any{"type": "api_error", "message": streamFailure.Error()},
+			})
+			break
+		}
 		visible := content != "" || len(toolCalls) > 0
 		recordRequestLatencyPhases(reqLog, eventAt, reasoning != "", visible)
 		if firstOutputAt.IsZero() && (reasoning != "" || visible) {

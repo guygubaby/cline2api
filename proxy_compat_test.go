@@ -267,6 +267,21 @@ func TestHandleChatStreamRecordsTerminalReason(t *testing.T) {
 	}
 }
 
+func TestHandleChatStreamStopsRunawayRepeatedText(t *testing.T) {
+	upstream := &http.Response{Body: io.NopCloser(strings.NewReader(repetitiveChatSSE(t, 64)))}
+	recorder := httptest.NewRecorder()
+	reqLog := &RequestLog{StartedAt: time.Now(), Protocol: "openai", Model: "m1", Stream: true}
+
+	handleStreamResponse(recorder, upstream, nil, reqLog, false)
+
+	if reqLog.Completed || reqLog.ErrorCode != repetitiveOutputErrorCode {
+		t.Fatalf("runaway Chat stream log = %#v", reqLog)
+	}
+	if !strings.Contains(recorder.Body.String(), `"code":"repetitive_output"`) || strings.Contains(recorder.Body.String(), "data: [DONE]") {
+		t.Fatalf("runaway Chat stream did not fail safely: %s", recorder.Body.String())
+	}
+}
+
 func TestNormalizeOpenAIChatResponseUsesStandardFields(t *testing.T) {
 	response := normalizeOpenAIChatResponse(map[string]any{
 		"id":                "chatcmpl_1",

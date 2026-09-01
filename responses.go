@@ -826,6 +826,8 @@ func chatStreamToResponses(w http.ResponseWriter, upstream *http.Response, reqLo
 	var readFailure error
 	sawDone := false
 	firstOutputAt := time.Time{}
+	var visibleRepetition outputRepetitionGuard
+	var reasoningRepetition outputRepetitionGuard
 	startedAt := time.Now()
 	if reqLog != nil {
 		startedAt = reqLog.StartedAt
@@ -905,6 +907,10 @@ func chatStreamToResponses(w http.ResponseWriter, upstream *http.Response, reqLo
 						}
 						if d, ok := delta.(map[string]any); ok {
 							if reasoning := reasoningContent(d); reasoning != "" {
+								if reasoningRepetition.Observe(reasoning) {
+									streamFailure = errRepetitiveOutput
+									break
+								}
 								recordRequestLatencyPhases(reqLog, eventAt, true, false)
 								ensureReasoningItem()
 								reasoningText.WriteString(reasoning)
@@ -917,6 +923,10 @@ func chatStreamToResponses(w http.ResponseWriter, upstream *http.Response, reqLo
 								}
 							}
 							if content, _ := d["content"].(string); content != "" {
+								if visibleRepetition.Observe(content) {
+									streamFailure = errRepetitiveOutput
+									break
+								}
 								recordRequestLatencyPhases(reqLog, eventAt, false, true)
 								ensureTextItem()
 								outText.WriteString(content)

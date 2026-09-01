@@ -584,6 +584,51 @@ func TestHandleAnthropicStreamTreatsReasoningAsFirstOutput(t *testing.T) {
 	}
 }
 
+func TestHandleAnthropicStreamStopsRunawayRepeatedText(t *testing.T) {
+	const repeated = "<total_tokens>15000000 tokens left</total_tokens> "
+	lines := make([]string, 0, 66)
+	for i := 0; i < 64; i++ {
+		content := repeated
+		if i%11 == 10 {
+			content = "<tool_usage> " + content
+		}
+		chunk, err := json.Marshal(map[string]any{
+			"choices": []any{map[string]any{
+				"delta": map[string]any{"content": content},
+			}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines = append(lines, "data: "+string(chunk))
+	}
+	lines = append(lines, "data: [DONE]", "")
+
+	recorder := httptest.NewRecorder()
+	reqLog := &RequestLog{StartedAt: time.Now(), Protocol: "anthropic", Model: "deepseek/deepseek-v4-flash", Stream: true}
+	handleAnthropicStream(recorder, &http.Response{Body: io.NopCloser(strings.NewReader(strings.Join(lines, "\n")))}, nil, reqLog, 20)
+
+	events := decodeSSEEvents(t, recorder.Body.String())
+	var visible strings.Builder
+	hasError := false
+	for _, event := range events {
+		if event["type"] == "error" {
+			hasError = true
+		}
+		delta, _ := event["delta"].(map[string]any)
+		if delta["type"] == "text_delta" {
+			text, _ := delta["text"].(string)
+			visible.WriteString(text)
+		}
+	}
+	if count := strings.Count(visible.String(), repeated); count > 12 {
+		t.Fatalf("runaway pattern was forwarded %d times", count)
+	}
+	if !hasError || reqLog.ErrorCode != "repetitive_output" || reqLog.Completed {
+		t.Fatalf("runaway stream was not terminated safely: hasError=%v log=%#v", hasError, reqLog)
+	}
+}
+
 func TestSemanticEmptyCircuitFingerprintIsPrivateSpecificAndExpires(t *testing.T) {
 	first := map[string]any{
 		"model":    "deepseek/deepseek-v4-flash",
