@@ -3,12 +3,16 @@ package main
 import "net/http"
 
 func writeOpenAIError(w http.ResponseWriter, status int, errorType, message string) {
+	writeOpenAIErrorCode(w, status, errorType, nil, message)
+}
+
+func writeOpenAIErrorCode(w http.ResponseWriter, status int, errorType string, errorCode any, message string) {
 	writeJSON(w, status, map[string]any{
 		"error": map[string]any{
 			"message": message,
 			"type":    errorType,
 			"param":   nil,
-			"code":    nil,
+			"code":    errorCode,
 		},
 	})
 }

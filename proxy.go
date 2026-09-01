@@ -197,7 +197,8 @@ var passThroughKeys = []string{
 	"tools", "tool_choice", "parallel_tool_calls", "functions", "function_call",
 	"temperature", "top_p", "top_k", "stop", "presence_penalty", "frequency_penalty",
 	"response_format", "user", "n", "logit_bias", "seed", "logprobs", "top_logprobs",
-	"stream_options", "metadata", "thinking",
+	"stream_options", "metadata", "thinking", "service_tier", "safety_identifier",
+	"prompt_cache_key", "prompt_cache_options", "prompt_cache_retention",
 }
 
 type chatRequest struct {
@@ -211,6 +212,69 @@ type chatRequest struct {
 	ReasoningEffort     string          `json:"reasoning_effort,omitempty"`
 	ReasoningEffortAlt  string          `json:"reasoningEffort,omitempty"`
 	Extra               map[string]any  `json:"-"`
+}
+
+func validateChatCompletionRequest(params map[string]any) error {
+	if model, _ := params["model"].(string); strings.TrimSpace(model) == "" {
+		return fmt.Errorf("model is required")
+	}
+	messages, ok := params["messages"].([]any)
+	if !ok || len(messages) == 0 {
+		return fmt.Errorf("messages is required and must be a non-empty array")
+	}
+	if streamValue, exists := params["stream"]; exists {
+		if _, ok := streamValue.(bool); !ok {
+			return fmt.Errorf("stream must be a boolean")
+		}
+	}
+	if rawOptions, exists := params["stream_options"]; exists {
+		if streaming, _ := params["stream"].(bool); !streaming {
+			return fmt.Errorf("stream_options may only be set when stream is true")
+		}
+		options, ok := rawOptions.(map[string]any)
+		if !ok {
+			return fmt.Errorf("stream_options must be an object")
+		}
+		for _, field := range []string{"include_usage", "include_obfuscation"} {
+			if value, exists := options[field]; exists {
+				if _, ok := value.(bool); !ok {
+					return fmt.Errorf("stream_options.%s must be a boolean", field)
+				}
+			}
+		}
+	}
+	if store, exists := params["store"]; exists {
+		value, ok := store.(bool)
+		if !ok {
+			return fmt.Errorf("store must be a boolean")
+		}
+		if value {
+			return fmt.Errorf("store=true is not supported because this proxy does not persist Chat Completions")
+		}
+	}
+	if modalities, exists := params["modalities"]; exists {
+		items, ok := modalities.([]any)
+		if !ok {
+			return fmt.Errorf("modalities must be an array")
+		}
+		for _, item := range items {
+			if item != "text" {
+				return fmt.Errorf("only the text modality is supported by this upstream")
+			}
+		}
+	}
+	for _, unsupported := range []string{"audio", "prediction", "web_search_options"} {
+		if value, exists := params[unsupported]; exists && value != nil {
+			return fmt.Errorf("%s is not supported by this chat-completions upstream", unsupported)
+		}
+	}
+	return nil
+}
+
+func chatStreamIncludesUsage(params map[string]any) bool {
+	options, _ := params["stream_options"].(map[string]any)
+	include, _ := options["include_usage"].(bool)
+	return include
 }
 
 func startProxy(host string, port int) error {
@@ -325,16 +389,21 @@ func startProxy(host string, port int) error {
 		}
 
 		isStream, _ := params["stream"].(bool)
+		model, _ := params["model"].(string)
+		reqLog := RequestLog{StartedAt: time.Now(), Protocol: "openai", Model: model, Stream: isStream}
+		if err := validateChatCompletionRequest(params); err != nil {
+			finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
+			writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+			return
+		}
+		includeUsage := chatStreamIncludesUsage(params)
 		toolCount := 0
 		if tools, ok := params["tools"]; ok {
 			if t, ok := tools.([]any); ok {
 				toolCount = len(t)
 			}
 		}
-		model, _ := params["model"].(string)
 		log.Printf("  client: stream=%v tools=%d model=%s", isStream, toolCount, model)
-
-		reqLog := RequestLog{StartedAt: time.Now(), Protocol: "openai", Model: model, Stream: isStream}
 
 		// Override system prompt from override.md for OpenAI format
 		if override := loadOverrideContent(); override != "" {
@@ -384,7 +453,12 @@ func startProxy(host string, port int) error {
 			}
 			defer resp.Body.Close()
 			if isStream {
-				handleStreamResponse(w, resp, nil, &reqLog)
+				prepared, _, prepareErr := prepareSemanticChatStreamWithTimeout(resp, upstreamFirstEventTimeout)
+				if prepareErr != nil {
+					writeOpenAIUpstreamError(w, &reqLog, prepareErr)
+					return
+				}
+				handleStreamResponse(w, prepared, nil, &reqLog, includeUsage)
 			} else {
 				handleNonStreamResponse(w, resp, nil, &reqLog)
 			}
@@ -415,25 +489,25 @@ func startProxy(host string, port int) error {
 			usage := parseTokenUsage(out["usage"])
 			recordTokenUsage(acc, reqLog.Model, usage)
 			finalizeRequestLog(&reqLog, usage, time.Time{}, reqLog.StartedAt, true, "")
-			writeJSON(w, http.StatusOK, out)
+			writeJSON(w, http.StatusOK, normalizeOpenAIChatResponse(out, reqLog.Model, false))
 			return
 		}
 
-		resp, acc, err := callClineAPI(params, true)
-		if err != nil {
-			log.Printf("  api error: %v", err)
-			finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
-			writeOpenAIError(w, http.StatusBadGateway, "api_error", err.Error())
-			return
-		}
 		reqLog.Upstream = upstreamCline
-		defer resp.Body.Close()
+		resp, acc, retryCount, err := callClineChatStream(params)
+		reqLog.RetryCount = retryCount
 		if acc != nil {
 			reqLog.AccountID = acc.AccountID
 			reqLog.AccountEmail = acc.Email
 		}
+		if err != nil {
+			log.Printf("  api error: %v", err)
+			writeOpenAIUpstreamError(w, &reqLog, err)
+			return
+		}
+		defer resp.Body.Close()
 
-		handleStreamResponse(w, resp, acc, &reqLog)
+		handleStreamResponse(w, resp, acc, &reqLog, includeUsage)
 	})
 	mux.HandleFunc("/v1/chat/completions", chatHandler)
 	mux.HandleFunc("/chat/completions", chatHandler)
@@ -1118,7 +1192,57 @@ func getMsgCount(params map[string]any) int {
 	return 0
 }
 
-func handleStreamResponse(w http.ResponseWriter, upstream *http.Response, acc *Account, reqLog *RequestLog) {
+func hasStandardChatOutput(obj map[string]any) bool {
+	choices, _ := obj["choices"].([]any)
+	for _, rawChoice := range choices {
+		choice, _ := rawChoice.(map[string]any)
+		if choice == nil {
+			continue
+		}
+		delta, _ := choice["delta"].(map[string]any)
+		if delta == nil {
+			delta, _ = choice["message"].(map[string]any)
+		}
+		if delta == nil {
+			continue
+		}
+		if content, _ := delta["content"].(string); content != "" {
+			return true
+		}
+		if refusal, _ := delta["refusal"].(string); refusal != "" {
+			return true
+		}
+		if toolCalls, _ := delta["tool_calls"].([]any); len(toolCalls) > 0 {
+			return true
+		}
+		if delta["function_call"] != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func shouldForwardStandardChatChunk(obj map[string]any) bool {
+	if obj["moderation"] != nil {
+		return true
+	}
+	choices, _ := obj["choices"].([]any)
+	for _, rawChoice := range choices {
+		choice, _ := rawChoice.(map[string]any)
+		if choice == nil {
+			continue
+		}
+		if choice["finish_reason"] != nil {
+			return true
+		}
+		if delta, _ := choice["delta"].(map[string]any); len(delta) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func handleStreamResponse(w http.ResponseWriter, upstream *http.Response, acc *Account, reqLog *RequestLog, includeUsage bool) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -1133,51 +1257,84 @@ func handleStreamResponse(w http.ResponseWriter, upstream *http.Response, acc *A
 
 	reader := bufio.NewReader(upstream.Body)
 	var latestUsage tokenUsage
+	var latestUsagePayload map[string]any
 	var firstOutputAt time.Time
+	streamID := ""
+	streamCreated := any(nil)
+	streamModel := ""
+	streamOptional := map[string]any{}
 	finishReason := ""
 	sawDone := false
+	hasOutput := false
 	var streamFailure error
 	for {
 		line, readErr := reader.ReadString('\n')
 		if line != "" {
 			line = strings.TrimRight(line, "\r\n")
-			forwarded := false
 			if strings.HasPrefix(line, "data:") {
 				payload := strings.TrimSpace(line[5:])
 				if payload == "[DONE]" {
 					sawDone = true
-					w.Write([]byte(line + "\n\n"))
-					flusher.Flush()
-					forwarded = true
 				} else if payload != "" {
 					var obj map[string]any
-					if err := json.Unmarshal([]byte(payload), &obj); err == nil {
-						obj = unwrapDataEnvelope(obj)
-						if upstreamError := obj["error"]; upstreamError != nil {
-							streamFailure = streamError(upstreamError)
-							break
-						}
-						normalized := normalizeOpenAIResponse(obj)
-						if usage := parseTokenUsage(normalized["usage"]); usage.Valid {
-							latestUsage = mergeTokenUsage(latestUsage, usage)
-						}
-						if reason, _ := getNested(normalized, "choices", 0, "finish_reason").(string); reason != "" {
-							finishReason = reason
-						}
-						if firstOutputAt.IsZero() && hasFirstOutput(normalized) {
-							firstOutputAt = time.Now()
-						}
-						if normalizedBytes, err := json.Marshal(normalized); err == nil {
-							w.Write([]byte("data: " + string(normalizedBytes) + "\n\n"))
-							flusher.Flush()
-							forwarded = true
+					if err := json.Unmarshal([]byte(payload), &obj); err != nil {
+						streamFailure = fmt.Errorf("decode upstream SSE event: %w", err)
+						break
+					}
+					obj = unwrapDataEnvelope(obj)
+					if upstreamError := obj["error"]; upstreamError != nil {
+						streamFailure = streamError(upstreamError)
+						break
+					}
+					if usage := parseTokenUsage(obj["usage"]); usage.Valid {
+						latestUsage = mergeTokenUsage(latestUsage, usage)
+					}
+					if usage := normalizeChatUsage(obj["usage"]); usage != nil {
+						latestUsagePayload = usage
+					}
+
+					normalized := normalizeOpenAIChatResponse(obj, reqLog.Model, true)
+					if streamID == "" {
+						streamID, _ = normalized["id"].(string)
+					}
+					if streamCreated == nil {
+						streamCreated = normalized["created"]
+					}
+					if model, _ := normalized["model"].(string); streamModel == "" && model != "" {
+						streamModel = model
+					}
+					normalized["id"] = streamID
+					normalized["created"] = streamCreated
+					normalized["model"] = streamModel
+					for _, field := range []string{"obfuscation", "service_tier", "system_fingerprint"} {
+						if value, exists := normalized[field]; exists {
+							streamOptional[field] = value
 						}
 					}
+					if includeUsage {
+						normalized["usage"] = nil
+					} else {
+						delete(normalized, "usage")
+					}
+					if reason, _ := getNested(normalized, "choices", 0, "finish_reason").(string); reason != "" {
+						finishReason = reason
+					}
+					if hasStandardChatOutput(normalized) {
+						hasOutput = true
+						if firstOutputAt.IsZero() {
+							firstOutputAt = time.Now()
+						}
+					}
+					if shouldForwardStandardChatChunk(normalized) {
+						normalizedBytes, err := json.Marshal(normalized)
+						if err != nil {
+							streamFailure = fmt.Errorf("encode Chat Completions chunk: %w", err)
+							break
+						}
+						w.Write([]byte("data: " + string(normalizedBytes) + "\n\n"))
+						flusher.Flush()
+					}
 				}
-			}
-			if !forwarded {
-				w.Write([]byte(line + "\n"))
-				flusher.Flush()
 			}
 		}
 		if readErr != nil {
@@ -1189,6 +1346,9 @@ func handleStreamResponse(w http.ResponseWriter, upstream *http.Response, acc *A
 	}
 	if streamFailure == nil && !sawDone && finishReason == "" {
 		streamFailure = errStreamEarlyEOF
+	}
+	if streamFailure == nil && !hasOutput {
+		streamFailure = errEmptyResponseContent
 	}
 	reqLog.FinishReason = finishReason
 	reqLog.SawDone = sawDone
@@ -1204,6 +1364,20 @@ func handleStreamResponse(w http.ResponseWriter, upstream *http.Response, acc *A
 			},
 		})
 		w.Write([]byte("data: " + string(payload) + "\n\n"))
+		flusher.Flush()
+	} else {
+		if includeUsage && latestUsagePayload != nil {
+			usageChunk := map[string]any{
+				"id": streamID, "object": "chat.completion.chunk", "created": streamCreated,
+				"model": streamModel, "choices": []any{}, "usage": latestUsagePayload,
+			}
+			for field, value := range streamOptional {
+				usageChunk[field] = value
+			}
+			payload, _ := json.Marshal(usageChunk)
+			w.Write([]byte("data: " + string(payload) + "\n\n"))
+		}
+		w.Write([]byte("data: [DONE]\n\n"))
 		flusher.Flush()
 	}
 	recordTokenUsage(acc, reqLog.Model, latestUsage)
@@ -1264,6 +1438,7 @@ func handleNonStreamResponse(w http.ResponseWriter, upstream *http.Response, acc
 	usage := parseTokenUsage(out["usage"])
 	recordTokenUsage(acc, reqLog.Model, usage)
 	finalizeRequestLog(reqLog, usage, time.Time{}, reqLog.StartedAt, true, "")
+	out = normalizeOpenAIChatResponse(out, reqLog.Model, false)
 
 	if msg, ok := getNested(out, "choices", 0, "message").(map[string]any); ok {
 		tc, _ := msg["tool_calls"].([]any)
@@ -2481,6 +2656,132 @@ func normalizeOpenAIResponse(obj map[string]any) map[string]any {
 		out["choices"] = normalized
 	}
 
+	return out
+}
+
+func copyAllowedFields(source map[string]any, fields ...string) map[string]any {
+	out := make(map[string]any, len(fields))
+	for _, field := range fields {
+		if value, exists := source[field]; exists {
+			out[field] = value
+		}
+	}
+	return out
+}
+
+func normalizeChatToolCalls(value any, streaming bool) []any {
+	toolCalls, _ := value.([]any)
+	normalized := make([]any, 0, len(toolCalls))
+	for _, rawCall := range toolCalls {
+		call, _ := rawCall.(map[string]any)
+		if call == nil {
+			continue
+		}
+		fields := []string{"id", "type", "function", "custom"}
+		if streaming {
+			fields = append(fields, "index")
+		}
+		cleanCall := copyAllowedFields(call, fields...)
+		if function, _ := cleanCall["function"].(map[string]any); function != nil {
+			cleanCall["function"] = copyAllowedFields(function, "name", "arguments")
+		}
+		if custom, _ := cleanCall["custom"].(map[string]any); custom != nil {
+			cleanCall["custom"] = copyAllowedFields(custom, "name", "input")
+		}
+		normalized = append(normalized, cleanCall)
+	}
+	return normalized
+}
+
+func normalizeChatMessageFields(value any, streaming bool) map[string]any {
+	message, _ := value.(map[string]any)
+	if message == nil {
+		return map[string]any{}
+	}
+	fields := []string{"role", "content", "refusal", "function_call", "tool_calls"}
+	if !streaming {
+		fields = append(fields, "annotations", "audio")
+	}
+	out := copyAllowedFields(message, fields...)
+	if _, exists := out["tool_calls"]; exists {
+		out["tool_calls"] = normalizeChatToolCalls(out["tool_calls"], streaming)
+		if _, hasContent := out["content"]; !hasContent {
+			out["content"] = ""
+		}
+	}
+	return out
+}
+
+func normalizeChatUsage(value any) map[string]any {
+	usage, _ := value.(map[string]any)
+	if usage == nil {
+		return nil
+	}
+	out := copyAllowedFields(usage,
+		"prompt_tokens", "completion_tokens", "total_tokens",
+		"prompt_tokens_details", "completion_tokens_details",
+	)
+	if details, _ := out["prompt_tokens_details"].(map[string]any); details != nil {
+		out["prompt_tokens_details"] = copyAllowedFields(details,
+			"audio_tokens", "cache_write_tokens", "cached_tokens", "image_tokens", "text_tokens",
+		)
+	}
+	if details, _ := out["completion_tokens_details"].(map[string]any); details != nil {
+		out["completion_tokens_details"] = copyAllowedFields(details,
+			"accepted_prediction_tokens", "audio_tokens", "reasoning_tokens",
+			"rejected_prediction_tokens", "text_tokens", "compute_units",
+		)
+	}
+	return out
+}
+
+func normalizeOpenAIChatResponse(obj map[string]any, fallbackModel string, streaming bool) map[string]any {
+	source := normalizeOpenAIResponse(obj)
+	topLevelFields := []string{
+		"id", "choices", "created", "model", "moderation", "service_tier", "system_fingerprint", "usage",
+	}
+	if streaming {
+		topLevelFields = append(topLevelFields, "obfuscation")
+	} else {
+		topLevelFields = append(topLevelFields, "metadata")
+	}
+	out := copyAllowedFields(source, topLevelFields...)
+	if id, _ := out["id"].(string); id == "" {
+		out["id"] = newResponseID("chatcmpl_")
+	}
+	if _, exists := out["created"]; !exists {
+		out["created"] = time.Now().Unix()
+	}
+	if model, _ := out["model"].(string); model == "" {
+		out["model"] = fallbackModel
+	}
+	if streaming {
+		out["object"] = "chat.completion.chunk"
+	} else {
+		out["object"] = "chat.completion"
+	}
+
+	choices, _ := source["choices"].([]any)
+	normalizedChoices := make([]any, 0, len(choices))
+	for _, rawChoice := range choices {
+		choice, _ := rawChoice.(map[string]any)
+		if choice == nil {
+			continue
+		}
+		cleanChoice := copyAllowedFields(choice, "index", "finish_reason", "logprobs")
+		if streaming {
+			cleanChoice["delta"] = normalizeChatMessageFields(choice["delta"], true)
+		} else {
+			cleanChoice["message"] = normalizeChatMessageFields(choice["message"], false)
+		}
+		normalizedChoices = append(normalizedChoices, cleanChoice)
+	}
+	out["choices"] = normalizedChoices
+	if usage := normalizeChatUsage(source["usage"]); usage != nil {
+		out["usage"] = usage
+	} else {
+		delete(out, "usage")
+	}
 	return out
 }
 

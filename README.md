@@ -94,7 +94,7 @@ Model:    cline-free/glm-5.2
 
 | 协议 | 标准端点 | 已支持的核心调用 |
 |------|----------|------------------|
-| OpenAI Chat Completions | `POST /v1/chat/completions` | 文本、多模态图片、自定义函数工具、并行工具调用、流式输出 |
+| OpenAI Chat Completions | `POST /v1/chat/completions` | 标准 Chat Completion / Chunk、文本、多模态图片、函数工具、并行工具调用、`stream_options.include_usage` |
 | OpenAI Responses | `POST /v1/responses` | `input` / `instructions`、多模态图片、`reasoning.effort`、`text.format`、自定义函数与 `function_call_output`、标准 Responses SSE 生命周期 |
 | Anthropic Messages | `POST /v1/messages` | system/content blocks、base64/URL 图片、`stop_sequences`、`output_config`、客户端工具、多个 `tool_result`、标准 Messages SSE 生命周期 |
 | Anthropic Token Count | `POST /v1/messages/count_tokens` | 返回标准 `{ "input_tokens": number }` 结构（本地近似估算） |
@@ -103,7 +103,9 @@ Model:    cline-free/glm-5.2
 
 > 上游实际是 Chat Completions，因此无法可靠模拟需要厂商服务端状态或托管执行环境的功能。OpenAI 的 `background`、`previous_response_id`、`conversation`、托管工具，以及 Anthropic 的服务端工具、容器/Skill 等请求会返回标准错误，不会静默丢弃。Responses 可通过在下一次 `input` 中回传之前的 output items 实现无状态多轮调用。
 
-Responses 流会把上游 `reasoning_content` 转换为标准 reasoning item 与 reasoning summary delta，并在后续 input 中恢复 reasoning history。代理会在提交客户端 SSE 前检查流初始化；遇到可恢复的 429、5xx、空流或提前 EOF 时最多切换一个账号重试一次。只有收到 `[DONE]` 或明确 `finish_reason` 才会标记完成；`length` / `content_filter` 返回 `response.incomplete`，无终止事件的 EOF 返回 `response.failed`。
+Responses 流会把上游 `reasoning_content` 转换为标准 reasoning item 与 reasoning summary delta，并在后续 input 中恢复 reasoning history。代理会在提交客户端 SSE 前检查流初始化；遇到可恢复的 429、5xx、空流、首事件超时或提前 EOF 时最多切换一个账号重试一次。只有收到 `[DONE]` 或明确 `finish_reason` 才会标记完成；`length` / `content_filter` 返回 `response.incomplete`，无终止事件的 EOF 返回 `response.failed`。
+
+Chat Completions 对外只返回 OpenAI 标准字段；上游专用的 `reasoning_content`、计费字段与 provider metadata 不会泄漏。需要流式 reasoning 的客户端应使用 Responses。设置 `stream_options: {"include_usage": true}` 时，普通 chunk 的 `usage` 为 `null`，并在 `[DONE]` 前发送 `choices: []` 的最终 usage chunk。Chat 与 Responses 共享 30 秒首事件超时、模型级短暂冷却和最多一次换号重试。
 
 现代 Codex 自定义 Provider 使用 Responses 协议。仓库内的 `codex-models.json` 提供 DeepSeek 与 GLM 的 1M 上下文、reasoning、shell 和 apply_patch 元数据，可避免 Codex 的 unknown-model 临时错误。示例 `~/.codex/config.toml`：
 
@@ -129,7 +131,7 @@ DeepSeek 的客户端非流式请求会在 Cline 上游使用 SSE，再聚合为
 
 Usage 元数据按各协议的标准字段返回：OpenAI Chat 使用 `prompt_tokens` / `completion_tokens` / `total_tokens`，Responses 使用 `input_tokens` / `output_tokens` 及 cache/reasoning details，Anthropic 使用独立的 input、cache read、cache creation、output 与 thinking counters。由于 Cline 上游只在流结束时给出真实 usage，Anthropic `message_start` 的 input 是本地预估值，最终 `message_delta` 会返回真实明细；这可兼顾 Claude Code session log 的上下文显示与实时 TTFT。
 
-Anthropic 流式转换会把 Cline/DeepSeek 的 `reasoning_content` 输出为标准 `thinking` block，并在后续工具调用历史中恢复为上游要求的 reasoning。代理会在提交客户端 SSE 前确认上游至少返回正文或工具调用；reasoning-only / 仅 EOS 的空流最多换一个账号重试一次。仍为空时返回不可重试的 `400 invalid_request_error`，提示客户端执行 `/compact` 或 `/clear`；相同请求的 SHA-256 指纹会短时熔断，避免重试风暴，指纹不保存会话内容。
+Anthropic 流式转换会把 Cline/DeepSeek 的 `reasoning_content` 立即输出为标准 `thinking` block，并在后续工具调用历史中恢复为上游要求的 reasoning。只有 reasoning、正文和工具调用全部为空时才最多换一个账号重试一次；30 秒没有任何语义事件时会对该账号当前模型短暂冷却。仍为空时返回不可重试的 `400 invalid_request_error`，提示客户端执行 `/compact` 或 `/clear`；相同请求的 SHA-256 指纹会短时熔断，避免重试风暴，指纹不保存会话内容。
 
 `GET /v1/models` 在收到 `anthropic-version` 请求头时返回 Anthropic Models 标准结构，包括 `max_input_tokens` 与 `max_tokens`；OpenAI 请求仍保持其标准的基础 Model 对象，不添加非标准 context 字段。
 

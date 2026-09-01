@@ -505,6 +505,66 @@ func TestResponsesStreamMapsRepeatedInitializationRateLimit(t *testing.T) {
 	}
 }
 
+func TestResponsesStreamRetriesFirstEventTimeoutAndCoolsDownSlowAccount(t *testing.T) {
+	firstAccount := &Account{
+		AccountID: "responses-slow", Email: "slow@example.com", AccessToken: "workos:slow",
+		ExpiresAt: time.Now().Add(time.Hour).UnixMilli(), Status: "active", ModelCooldowns: map[string]time.Time{},
+	}
+	secondAccount := &Account{
+		AccountID: "responses-fast", Email: "fast@example.com", AccessToken: "workos:fast",
+		ExpiresAt: time.Now().Add(time.Hour).UnixMilli(), Status: "active", ModelCooldowns: map[string]time.Time{},
+	}
+	currentPool := loadPool()
+	poolMu.Lock()
+	oldAccounts, oldIndex := currentPool.Accounts, currentPool.CurrentIdx
+	currentPool.Accounts = []*Account{firstAccount, secondAccount}
+	currentPool.CurrentIdx = 0
+	poolMu.Unlock()
+	t.Cleanup(func() {
+		poolMu.Lock()
+		currentPool.Accounts = oldAccounts
+		currentPool.CurrentIdx = oldIndex
+		poolMu.Unlock()
+		savePool()
+	})
+
+	oldHTTPClient := httpClient
+	requestCount := 0
+	var blockedWriter *io.PipeWriter
+	httpClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requestCount++
+		if requestCount == 1 {
+			reader, writer := io.Pipe()
+			blockedWriter = writer
+			return &http.Response{StatusCode: http.StatusOK, Body: reader, Request: request}, nil
+		}
+		body := "data: {\"model\":\"m1\",\"choices\":[{\"delta\":{\"reasoning_content\":\"ready\"}}]}\n\n"
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Request: request}, nil
+	})}
+	t.Cleanup(func() {
+		httpClient = oldHTTPClient
+		if blockedWriter != nil {
+			_ = blockedWriter.Close()
+		}
+	})
+
+	model := "deepseek/deepseek-v4-flash"
+	response, account, retryCount, err := callClineResponsesStreamWithTimeout(map[string]any{
+		"model": model, "stream": true,
+		"messages": []any{map[string]any{"role": "user", "content": "hello"}},
+	}, 20*time.Millisecond)
+	if err != nil {
+		t.Fatalf("retry Responses stream: %v", err)
+	}
+	defer response.Body.Close()
+	if requestCount != 2 || account != secondAccount || retryCount != 1 {
+		t.Fatalf("retry result: requests=%d account=%#v retries=%d", requestCount, account, retryCount)
+	}
+	if until := firstAccount.ModelCooldowns[model]; !until.After(time.Now()) {
+		t.Fatalf("slow account was not cooled down: %#v", firstAccount.ModelCooldowns)
+	}
+}
+
 func TestUsageToResponsesPreservesCacheWriteAndReasoningDetails(t *testing.T) {
 	parsed := parseTokenUsage(map[string]any{
 		"prompt_tokens":     float64(100),
@@ -536,6 +596,9 @@ func decodeSSEEvents(t *testing.T, body string) []map[string]any {
 	for _, block := range strings.Split(strings.TrimSpace(body), "\n\n") {
 		for _, line := range strings.Split(block, "\n") {
 			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			if strings.TrimSpace(strings.TrimPrefix(line, "data: ")) == "[DONE]" {
 				continue
 			}
 			var event map[string]any

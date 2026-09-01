@@ -230,7 +230,7 @@ func TestHandleChatStreamMarksEarlyEOFFailed(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	reqLog := &RequestLog{StartedAt: time.Now(), Protocol: "openai", Model: "m1", Stream: true}
 
-	handleStreamResponse(recorder, upstream, nil, reqLog)
+	handleStreamResponse(recorder, upstream, nil, reqLog, false)
 
 	if reqLog.Completed || reqLog.ErrorCode != "stream_early_eof" || reqLog.SawDone {
 		t.Fatalf("early EOF request log = %#v", reqLog)
@@ -251,10 +251,194 @@ func TestHandleChatStreamRecordsTerminalReason(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	reqLog := &RequestLog{StartedAt: time.Now(), Protocol: "openai", Model: "m1", Stream: true}
 
-	handleStreamResponse(recorder, upstream, nil, reqLog)
+	handleStreamResponse(recorder, upstream, nil, reqLog, false)
 
 	if !reqLog.Completed || reqLog.FinishReason != "stop" || !reqLog.SawDone || reqLog.ErrorCode != "" {
 		t.Fatalf("terminal request log = %#v", reqLog)
+	}
+}
+
+func TestNormalizeOpenAIChatResponseUsesStandardFields(t *testing.T) {
+	response := normalizeOpenAIChatResponse(map[string]any{
+		"id":                "chatcmpl_1",
+		"object":            "vendor.chunk",
+		"created":           float64(123),
+		"model":             "m1",
+		"provider_metadata": map[string]any{"secret": true},
+		"choices": []any{map[string]any{
+			"index": float64(0), "finish_reason": nil,
+			"delta": map[string]any{
+				"role": "assistant", "content": "hello", "reasoning_content": "hidden", "vendor": "drop",
+			},
+		}},
+		"usage": map[string]any{
+			"prompt_tokens": float64(10), "completion_tokens": float64(5), "total_tokens": float64(15),
+			"cost": float64(0.1), "is_byok": false,
+			"completion_tokens_details": map[string]any{"reasoning_tokens": float64(3), "vendor": float64(1)},
+		},
+	}, "m1", true)
+
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		t.Fatalf("encode normalized response: %v", err)
+	}
+	for _, forbidden := range []string{"reasoning_content", "provider_metadata", `"vendor"`, `"cost"`, "is_byok"} {
+		if strings.Contains(string(encoded), forbidden) {
+			t.Fatalf("non-standard field %q leaked: %s", forbidden, encoded)
+		}
+	}
+	if response["object"] != "chat.completion.chunk" {
+		t.Fatalf("stream object = %#v", response["object"])
+	}
+	if reasoning := getNested(response, "usage", "completion_tokens_details", "reasoning_tokens"); reasoning != float64(3) {
+		t.Fatalf("standard reasoning token usage was lost: %#v", response["usage"])
+	}
+
+	nonStream := normalizeOpenAIChatResponse(map[string]any{
+		"choices": []any{map[string]any{
+			"index": float64(0), "finish_reason": "stop",
+			"message": map[string]any{"role": "assistant", "content": "answer", "reasoning_content": "hidden"},
+		}},
+	}, "m1", false)
+	encoded, _ = json.Marshal(nonStream)
+	if nonStream["object"] != "chat.completion" || strings.Contains(string(encoded), "reasoning_content") {
+		t.Fatalf("non-stream response is not standard Chat Completions: %s", encoded)
+	}
+}
+
+func TestHandleChatStreamEmitsStandardUsageChunk(t *testing.T) {
+	upstreamBody := strings.Join([]string{
+		`data: {"id":"chatcmpl_1","object":"vendor.chunk","created":123,"model":"m1","choices":[{"index":0,"delta":{"reasoning_content":"hidden reasoning"}}]}`,
+		`data: {"id":"chatcmpl_1","created":123,"model":"m1","choices":[{"index":0,"delta":{"role":"assistant","content":"hello"}}]}`,
+		`data: {"id":"chatcmpl_1","created":123,"model":"m1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15,"cost":0.1,"completion_tokens_details":{"reasoning_tokens":3}}}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	upstream := &http.Response{Body: io.NopCloser(strings.NewReader(upstreamBody))}
+	recorder := httptest.NewRecorder()
+	reqLog := &RequestLog{StartedAt: time.Now().Add(-time.Second), Protocol: "openai", Model: "m1", Stream: true}
+
+	handleStreamResponse(recorder, upstream, nil, reqLog, true)
+
+	if strings.Contains(recorder.Body.String(), "reasoning_content") || strings.Contains(recorder.Body.String(), `"cost"`) {
+		t.Fatalf("non-standard Chat fields leaked: %s", recorder.Body.String())
+	}
+	events := decodeSSEEvents(t, recorder.Body.String())
+	if len(events) != 3 {
+		t.Fatalf("standard stream chunks = %d, want text + finish + usage: %#v", len(events), events)
+	}
+	for index, event := range events {
+		if event["object"] != "chat.completion.chunk" {
+			t.Fatalf("chunk %d object = %#v", index, event["object"])
+		}
+		if index < len(events)-1 && event["usage"] != nil {
+			t.Fatalf("ordinary chunk %d usage = %#v, want null", index, event["usage"])
+		}
+	}
+	usageChunk := events[len(events)-1]
+	if choices, _ := usageChunk["choices"].([]any); len(choices) != 0 {
+		t.Fatalf("usage chunk choices = %#v", usageChunk["choices"])
+	}
+	if getNested(usageChunk, "usage", "total_tokens") != float64(15) {
+		t.Fatalf("usage chunk = %#v", usageChunk)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(recorder.Body.String()), "data: [DONE]") {
+		t.Fatalf("stream does not end with [DONE]: %s", recorder.Body.String())
+	}
+	if reqLog.TTFTMs <= 0 || !reqLog.Completed {
+		t.Fatalf("request log = %#v", reqLog)
+	}
+}
+
+func TestValidateChatCompletionRequest(t *testing.T) {
+	valid := map[string]any{
+		"model": "m1", "messages": []any{map[string]any{"role": "user", "content": "hello"}},
+		"stream": true, "stream_options": map[string]any{"include_usage": true},
+	}
+	if err := validateChatCompletionRequest(valid); err != nil {
+		t.Fatalf("valid request rejected: %v", err)
+	}
+	for name, request := range map[string]map[string]any{
+		"missing model":    {"messages": []any{map[string]any{"role": "user", "content": "hello"}}},
+		"missing messages": {"model": "m1"},
+		"stream options without streaming": {
+			"model": "m1", "messages": []any{map[string]any{"role": "user", "content": "hello"}},
+			"stream_options": map[string]any{"include_usage": true},
+		},
+		"unsupported persistence": {
+			"model": "m1", "messages": []any{map[string]any{"role": "user", "content": "hello"}},
+			"store": true,
+		},
+		"unsupported audio": {
+			"model": "m1", "messages": []any{map[string]any{"role": "user", "content": "hello"}},
+			"modalities": []any{"text", "audio"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validateChatCompletionRequest(request); err == nil {
+				t.Fatalf("invalid request accepted: %#v", request)
+			}
+		})
+	}
+}
+
+func TestChatStreamRetriesFirstEventTimeoutAndCoolsDownSlowAccount(t *testing.T) {
+	firstAccount := &Account{
+		AccountID: "chat-slow", Email: "slow@example.com", AccessToken: "workos:slow",
+		ExpiresAt: time.Now().Add(time.Hour).UnixMilli(), Status: "active", ModelCooldowns: map[string]time.Time{},
+	}
+	secondAccount := &Account{
+		AccountID: "chat-fast", Email: "fast@example.com", AccessToken: "workos:fast",
+		ExpiresAt: time.Now().Add(time.Hour).UnixMilli(), Status: "active", ModelCooldowns: map[string]time.Time{},
+	}
+	currentPool := loadPool()
+	poolMu.Lock()
+	oldAccounts, oldIndex := currentPool.Accounts, currentPool.CurrentIdx
+	currentPool.Accounts = []*Account{firstAccount, secondAccount}
+	currentPool.CurrentIdx = 0
+	poolMu.Unlock()
+	t.Cleanup(func() {
+		poolMu.Lock()
+		currentPool.Accounts = oldAccounts
+		currentPool.CurrentIdx = oldIndex
+		poolMu.Unlock()
+		savePool()
+	})
+
+	oldHTTPClient := httpClient
+	requestCount := 0
+	var blockedWriter *io.PipeWriter
+	httpClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requestCount++
+		if requestCount == 1 {
+			reader, writer := io.Pipe()
+			blockedWriter = writer
+			return &http.Response{StatusCode: http.StatusOK, Body: reader, Request: request}, nil
+		}
+		body := "data: {\"model\":\"m1\",\"choices\":[{\"delta\":{\"content\":\"ready\"}}]}\n\n"
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Request: request}, nil
+	})}
+	t.Cleanup(func() {
+		httpClient = oldHTTPClient
+		if blockedWriter != nil {
+			_ = blockedWriter.Close()
+		}
+	})
+
+	model := "deepseek/deepseek-v4-flash"
+	response, account, retryCount, err := callClineChatStreamWithTimeout(map[string]any{
+		"model": model, "stream": true,
+		"messages": []any{map[string]any{"role": "user", "content": "hello"}},
+	}, 20*time.Millisecond)
+	if err != nil {
+		t.Fatalf("retry Chat stream: %v", err)
+	}
+	defer response.Body.Close()
+	if requestCount != 2 || account != secondAccount || retryCount != 1 {
+		t.Fatalf("retry result: requests=%d account=%#v retries=%d", requestCount, account, retryCount)
+	}
+	if until := firstAccount.ModelCooldowns[model]; !until.After(time.Now()) {
+		t.Fatalf("slow account was not cooled down: %#v", firstAccount.ModelCooldowns)
 	}
 }
 

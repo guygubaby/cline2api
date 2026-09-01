@@ -93,7 +93,7 @@ Both OpenAI and Anthropic API formats are supported.
 
 | Protocol | Standard endpoint | Supported core calls |
 |----------|-------------------|----------------------|
-| OpenAI Chat Completions | `POST /v1/chat/completions` | Text, multimodal images, custom function tools, parallel tool calls, streaming |
+| OpenAI Chat Completions | `POST /v1/chat/completions` | Standard Chat Completion / Chunk objects, text, multimodal images, function tools, parallel tool calls, `stream_options.include_usage` |
 | OpenAI Responses | `POST /v1/responses` | `input` / `instructions`, multimodal images, `reasoning.effort`, `text.format`, custom functions and `function_call_output`, standard Responses SSE lifecycle |
 | Anthropic Messages | `POST /v1/messages` | System/content blocks, base64/URL images, `stop_sequences`, `output_config`, client tools, multiple `tool_result` blocks, standard Messages SSE lifecycle |
 | Anthropic Token Count | `POST /v1/messages/count_tokens` | Standard `{ "input_tokens": number }` shape using a local approximation |
@@ -102,7 +102,9 @@ Authentication accepts both OpenAI's `Authorization: Bearer <key>` and Anthropic
 
 > The upstream is a Chat Completions service, so features requiring vendor-side state or hosted execution cannot be faithfully emulated. OpenAI `background`, `previous_response_id`, `conversation`, and hosted tools, plus Anthropic server tools, containers, and Skills, return a standard error instead of being silently dropped. For stateless multi-turn Responses calls, send previous output items back in the next `input`.
 
-Responses streaming maps upstream `reasoning_content` to standard reasoning items and reasoning-summary deltas, then restores reasoning history from subsequent input items. Before committing client SSE, the proxy checks stream initialization and retries at most once with another account after a recoverable 429, 5xx, empty stream, or early EOF. Completion requires `[DONE]` or an explicit `finish_reason`; `length` / `content_filter` produce `response.incomplete`, while EOF without a terminal event produces `response.failed`.
+Responses streaming maps upstream `reasoning_content` to standard reasoning items and reasoning-summary deltas, then restores reasoning history from subsequent input items. Before committing client SSE, the proxy checks stream initialization and retries at most once with another account after a recoverable 429, 5xx, empty stream, first-event timeout, or early EOF. Completion requires `[DONE]` or an explicit `finish_reason`; `length` / `content_filter` produce `response.incomplete`, while EOF without a terminal event produces `response.failed`.
+
+Chat Completions exposes only standard OpenAI fields; upstream-only `reasoning_content`, billing fields, and provider metadata are removed. Clients that need streamed reasoning should use Responses. With `stream_options: {"include_usage": true}`, ordinary chunks carry `usage: null` and a final `choices: []` usage chunk is emitted immediately before `[DONE]`. Chat and Responses share a 30-second first-event timeout, short model-level account cooldown, and at most one alternate-account retry.
 
 Current Codex custom providers use the Responses protocol. The included `codex-models.json` supplies 1M-context, reasoning, shell, and apply_patch metadata for DeepSeek and GLM, avoiding Codex's temporary unknown-model error. Example `~/.codex/config.toml`:
 
@@ -128,7 +130,7 @@ For client-side non-streaming DeepSeek requests, the Cline upstream is called wi
 
 Usage metadata follows each protocol's standard fields: OpenAI Chat uses `prompt_tokens` / `completion_tokens` / `total_tokens`; Responses uses `input_tokens` / `output_tokens` plus cache and reasoning details; Anthropic reports fresh input, cache read, cache creation, output, and thinking counters separately. Because the Cline upstream only reports exact usage at the end of a stream, Anthropic `message_start` carries a local input estimate while the final `message_delta` carries the exact breakdown. This preserves real-time TTFT while allowing Claude Code session logs to show context usage.
 
-Anthropic streaming maps Cline/DeepSeek `reasoning_content` to standard `thinking` blocks and restores it to the upstream-required reasoning history after tool calls. Before committing client SSE, the proxy verifies that upstream produced visible text or a tool call. A reasoning-only or EOS-only stream retries at most once with another account. A second empty result returns a non-retryable `400 invalid_request_error` with `/compact` or `/clear` guidance; an opaque SHA-256 request fingerprint is briefly circuit-broken to prevent retry storms without storing conversation content.
+Anthropic streaming immediately maps Cline/DeepSeek `reasoning_content` to standard `thinking` blocks and restores it to the upstream-required reasoning history after tool calls. A retry happens only when reasoning, visible text, and tool calls are all absent; an account that produces no semantic event for 30 seconds is briefly cooled down for that model. A second empty result returns a non-retryable `400 invalid_request_error` with `/compact` or `/clear` guidance; an opaque SHA-256 request fingerprint is briefly circuit-broken to prevent retry storms without storing conversation content.
 
 `GET /v1/models` returns the Anthropic Models shape, including `max_input_tokens` and `max_tokens`, when the request includes `anthropic-version`. OpenAI requests keep the standard basic Model object without non-standard context fields.
 

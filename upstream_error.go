@@ -95,8 +95,8 @@ func upstreamErrorStatus(err error) int {
 	return 0
 }
 
-func retryableResponsesInitializationError(err error) bool {
-	if errors.Is(err, errStreamEarlyEOF) || isEmptyResponseError(err) {
+func retryableStreamInitializationError(err error) bool {
+	if errors.Is(err, errStreamEarlyEOF) || errors.Is(err, errUpstreamFirstEventTimeout) || isEmptyResponseError(err) {
 		return true
 	}
 	status := upstreamErrorStatus(err)
@@ -110,8 +110,12 @@ func responsesUpstreamErrorDetails(err error) (int, string, string) {
 		return 429, "rate_limit_error", "rate_limit_exceeded"
 	case status >= 400 && status < 500:
 		return status, "invalid_request_error", "upstream_invalid_request"
+	case errors.Is(err, errUpstreamFirstEventTimeout):
+		return 504, "api_error", "upstream_timeout"
 	case errors.Is(err, errStreamEarlyEOF):
 		return 502, "api_error", "stream_early_eof"
+	case isEmptyResponseError(err):
+		return 502, "api_error", "empty_response_content"
 	default:
 		return 502, "api_error", "upstream_error"
 	}

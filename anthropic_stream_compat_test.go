@@ -145,7 +145,7 @@ func TestPrepareSemanticChatStreamTimesOutWithoutSemanticOutput(t *testing.T) {
 	response := &http.Response{StatusCode: http.StatusOK, Body: reader}
 
 	_, diagnostic, err := prepareSemanticChatStreamWithTimeout(response, 20*time.Millisecond)
-	if !errors.Is(err, errAnthropicFirstEventTimeout) {
+	if !errors.Is(err, errUpstreamFirstEventTimeout) {
 		t.Fatalf("first-event timeout error = %v", err)
 	}
 	if diagnostic.ReasoningChars != 0 {

@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -688,101 +687,35 @@ func newResponsesObject(id, model, status string) map[string]any {
 
 // ============ 流式响应转换（chat SSE → Responses SSE） ============
 
-func responsesChatEventHasProgress(event map[string]any) (bool, error) {
-	event = unwrapDataEnvelope(event)
-	if errorPayload := event["error"]; errorPayload != nil {
-		return false, streamError(errorPayload)
-	}
-	choices, _ := event["choices"].([]any)
-	for _, rawChoice := range choices {
-		choice, _ := rawChoice.(map[string]any)
-		if choice == nil {
-			continue
-		}
-		delta, _ := choice["delta"].(map[string]any)
-		if delta == nil {
-			delta, _ = choice["message"].(map[string]any)
-		}
-		if delta == nil {
-			continue
-		}
-		if strings.TrimSpace(reasoningContent(delta)) != "" {
-			return true, nil
-		}
-		if content, _ := delta["content"].(string); strings.TrimSpace(content) != "" {
-			return true, nil
-		}
-		if calls, _ := delta["tool_calls"].([]any); len(calls) > 0 {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
 func prepareResponsesChatStream(response *http.Response) (*http.Response, error) {
-	if response == nil || response.Body == nil {
-		return nil, errStreamEarlyEOF
-	}
-	originalBody := response.Body
-	reader := bufio.NewReader(originalBody)
-	var replay bytes.Buffer
-
-	for {
-		line, readErr := reader.ReadString('\n')
-		if line != "" {
-			replay.WriteString(line)
-			trimmed := strings.TrimRight(line, "\r\n")
-			if strings.HasPrefix(trimmed, "data:") {
-				payload := strings.TrimSpace(trimmed[5:])
-				if payload == "[DONE]" {
-					_ = originalBody.Close()
-					return nil, errEmptyResponseContent
-				}
-				if payload != "" {
-					var event map[string]any
-					if err := json.Unmarshal([]byte(payload), &event); err != nil {
-						_ = originalBody.Close()
-						return nil, fmt.Errorf("decode upstream SSE event: %w", err)
-					}
-					progress, err := responsesChatEventHasProgress(event)
-					if err != nil {
-						_ = originalBody.Close()
-						return nil, err
-					}
-					if progress {
-						response.Body = &replayReadCloser{
-							reader: io.MultiReader(bytes.NewReader(replay.Bytes()), reader),
-							closer: originalBody,
-						}
-						return response, nil
-					}
-				}
-			}
-		}
-		if readErr != nil {
-			_ = originalBody.Close()
-			if errors.Is(readErr, io.EOF) {
-				return nil, errStreamEarlyEOF
-			}
-			return nil, fmt.Errorf("read upstream SSE: %w", readErr)
-		}
-	}
+	return prepareUpstreamChatStreamWithTimeout(response, upstreamFirstEventTimeout)
 }
 
-func callClineResponsesStream(params map[string]any) (*http.Response, *Account, int, error) {
+func prepareUpstreamChatStreamWithTimeout(response *http.Response, timeout time.Duration) (*http.Response, error) {
+	prepared, _, err := prepareSemanticChatStreamWithTimeout(response, timeout)
+	return prepared, err
+}
+
+func callClinePreparedStreamWithTimeout(params map[string]any, timeout time.Duration, logPrefix string) (*http.Response, *Account, int, error) {
 	model, _ := params["model"].(string)
-	markRateLimited := func(account *Account, err error) {
-		if account != nil && upstreamErrorStatus(err) == http.StatusTooManyRequests {
+	markUnavailable := func(account *Account, err error) {
+		if account == nil {
+			return
+		}
+		switch {
+		case errors.Is(err, errUpstreamFirstEventTimeout):
+			setModelCooldown(account, model, time.Now().Add(slowAccountModelCooldown))
+		case upstreamErrorStatus(err) == http.StatusTooManyRequests:
 			setModelCooldown(account, model, time.Now().Add(5*time.Minute))
 		}
 	}
 
 	response, account, err := callClineAPI(params, true)
 	if err == nil {
-		response, err = prepareResponsesChatStream(response)
-		markRateLimited(account, err)
+		response, err = prepareUpstreamChatStreamWithTimeout(response, timeout)
 	}
-	if err == nil || !retryableResponsesInitializationError(err) {
+	markUnavailable(account, err)
+	if err == nil || !retryableStreamInitializationError(err) {
 		return response, account, 0, err
 	}
 
@@ -790,14 +723,30 @@ func callClineResponsesStream(params map[string]any) (*http.Response, *Account, 
 	if alternative == nil {
 		return nil, account, 0, err
 	}
-	log.Printf("  responses initialization failed (%v); retrying once with another account", err)
+	log.Printf("  %s initialization failed (%v); retrying once with another account", logPrefix, err)
 	retryResponse, retryAccount, retryErr := callClineAPIWithAccount(alternative, params, true)
 	if retryErr != nil {
 		return nil, retryAccount, 1, retryErr
 	}
-	retryResponse, retryErr = prepareResponsesChatStream(retryResponse)
-	markRateLimited(retryAccount, retryErr)
+	retryResponse, retryErr = prepareUpstreamChatStreamWithTimeout(retryResponse, timeout)
+	markUnavailable(retryAccount, retryErr)
 	return retryResponse, retryAccount, 1, retryErr
+}
+
+func callClineResponsesStream(params map[string]any) (*http.Response, *Account, int, error) {
+	return callClineResponsesStreamWithTimeout(params, upstreamFirstEventTimeout)
+}
+
+func callClineResponsesStreamWithTimeout(params map[string]any, timeout time.Duration) (*http.Response, *Account, int, error) {
+	return callClinePreparedStreamWithTimeout(params, timeout, "responses")
+}
+
+func callClineChatStream(params map[string]any) (*http.Response, *Account, int, error) {
+	return callClineChatStreamWithTimeout(params, upstreamFirstEventTimeout)
+}
+
+func callClineChatStreamWithTimeout(params map[string]any, timeout time.Duration) (*http.Response, *Account, int, error) {
+	return callClinePreparedStreamWithTimeout(params, timeout, "chat")
 }
 
 type responsesSSEWriter struct {
@@ -1226,11 +1175,11 @@ func usageToResponses(u tokenUsage) map[string]any {
 
 // ============ /v1/responses 入口 ============
 
-func writeResponsesUpstreamError(w http.ResponseWriter, reqLog *RequestLog, err error) {
+func writeOpenAIUpstreamError(w http.ResponseWriter, reqLog *RequestLog, err error) {
 	status, errorType, errorCode := responsesUpstreamErrorDetails(err)
 	reqLog.ErrorCode = errorCode
 	finalizeRequestLog(reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
-	writeOpenAIError(w, status, errorType, err.Error())
+	writeOpenAIErrorCode(w, status, errorType, errorCode, err.Error())
 }
 
 func finalizeResponsesNonStreamLog(reqLog *RequestLog, chat, response map[string]any, usage tokenUsage) {
@@ -1299,7 +1248,7 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 		upResp, err := callZenAPI(chat, isStream)
 		if err != nil {
 			log.Printf("  responses api error: %v", err)
-			writeResponsesUpstreamError(w, &reqLog, err)
+			writeOpenAIUpstreamError(w, &reqLog, err)
 			return
 		}
 
@@ -1307,7 +1256,7 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 			prepared, prepareErr := prepareResponsesChatStream(upResp)
 			if prepareErr != nil {
 				log.Printf("  responses zen initialization error: %v", prepareErr)
-				writeResponsesUpstreamError(w, &reqLog, prepareErr)
+				writeOpenAIUpstreamError(w, &reqLog, prepareErr)
 				return
 			}
 			defer prepared.Body.Close()
@@ -1341,7 +1290,7 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 			out, acc, err := callClineNonStream(chat)
 			if err != nil {
 				log.Printf("  responses api error: %v", err)
-				writeResponsesUpstreamError(w, &reqLog, err)
+				writeOpenAIUpstreamError(w, &reqLog, err)
 				return
 			}
 			if acc != nil {
@@ -1366,7 +1315,7 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 				reqLog.AccountID = acc.AccountID
 				reqLog.AccountEmail = acc.Email
 			}
-			writeResponsesUpstreamError(w, &reqLog, err)
+			writeOpenAIUpstreamError(w, &reqLog, err)
 			return
 		}
 		defer upResp.Body.Close()
