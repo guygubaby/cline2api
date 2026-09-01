@@ -711,6 +711,9 @@ func callClinePreparedStreamWithTimeout(params map[string]any, timeout time.Dura
 	}
 
 	response, account, err := callClineAPI(params, true)
+	if effectiveModel, _ := params["model"].(string); effectiveModel != "" {
+		model = effectiveModel
+	}
 	if err == nil {
 		response, err = prepareUpstreamChatStreamWithTimeout(response, timeout)
 	}
@@ -1288,6 +1291,7 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 		reqLog.Upstream = upstreamCline
 		if !isStream {
 			out, acc, err := callClineNonStream(chat)
+			setRequestLogEffectiveModel(&reqLog, chat)
 			if err != nil {
 				log.Printf("  responses api error: %v", err)
 				writeOpenAIUpstreamError(w, &reqLog, err)
@@ -1308,6 +1312,7 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 		}
 
 		upResp, acc, retryCount, err := callClineResponsesStream(chat)
+		setRequestLogEffectiveModel(&reqLog, chat)
 		reqLog.RetryCount = retryCount
 		if err != nil {
 			log.Printf("  responses api error: %v", err)

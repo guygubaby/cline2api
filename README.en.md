@@ -106,6 +106,8 @@ Responses streaming maps upstream `reasoning_content` to standard reasoning item
 
 Chat Completions exposes only standard OpenAI fields; upstream-only `reasoning_content`, billing fields, and provider metadata are removed. Clients that need streamed reasoning should use Responses. With `stream_options: {"include_usage": true}`, ordinary chunks carry `usage: null` and a final `choices: []` usage chunk is emitted immediately before `[DONE]`. Chat and Responses share a 30-second first-event timeout, short model-level account cooldown, and at most one alternate-account retry.
 
+You may also request the virtual `free` model. It tries `z-ai/glm-5.3-flash`, `deepseek/deepseek-v4-flash`, then `cline-free/longcat-2.0`. Each model is limited to two non-cooling accounts, for at most six upstream initializations per request, preventing unbounded retries during a free-pool outage. Request logs store the effective model.
+
 Current Codex custom providers use the Responses protocol. The included `codex-models.json` supplies 1M-context, reasoning, shell, and apply_patch metadata for DeepSeek and GLM, avoiding Codex's temporary unknown-model error. Example `~/.codex/config.toml`:
 
 ```bash
@@ -234,7 +236,7 @@ The application prefers atomic temp-file replacement. If Docker rejects `rename`
 - Set the default model in "Proxy Config → Default Model"; if unset, it falls back to the first free model
 
 > Built-in fallback models (used offline / when sync fails):
-> `cline-free/glm-5.2`, `cline-pass/glm-5.2`, `cline-pass/deepseek-v4-flash`, `cline-pass/qwen3.7-max`, `deepseek/deepseek-v4-flash`, `poolside/laguna-s-2.1:free`
+> `z-ai/glm-5.3-flash`, `cline-free/longcat-2.0`, `cline-pass/glm-5.2`, `cline-pass/deepseek-v4-flash`, `cline-pass/qwen3.7-max`, `deepseek/deepseek-v4-flash`, `poolside/laguna-s-2.1:free`
 
 ## Project Structure
 

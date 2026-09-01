@@ -80,6 +80,12 @@ func TestShouldForceClineStreamOnlyForNonStreamingDeepSeek(t *testing.T) {
 	if shouldForceClineStream(map[string]any{"model": "poolside/laguna-s-2.1:free"}, false) {
 		t.Fatal("non-DeepSeek request must keep the existing non-streaming path")
 	}
+	if !shouldForceClineStream(map[string]any{"model": virtualFreeModel}, false) {
+		t.Fatal("virtual free requests should aggregate a reliable upstream stream")
+	}
+	if !shouldForceClineStream(map[string]any{"model": "z-ai/glm-5.3-flash"}, false) {
+		t.Fatal("GLM 5.3 requests should aggregate a reliable upstream stream")
+	}
 }
 
 func TestAggregateChatCompletionStreamPreservesToolsUsageAndReasoning(t *testing.T) {

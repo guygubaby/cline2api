@@ -122,6 +122,15 @@ func appendRequestLog(entry RequestLog) {
 	requestLogsMu.Unlock()
 }
 
+func setRequestLogEffectiveModel(entry *RequestLog, params map[string]any) {
+	if entry == nil {
+		return
+	}
+	if model, _ := params["model"].(string); model != "" {
+		entry.Model = model
+	}
+}
+
 type requestLogPage struct {
 	Items      []RequestLog `json:"items"`
 	NextCursor string       `json:"nextCursor"`

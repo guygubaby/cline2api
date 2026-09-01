@@ -38,7 +38,7 @@ func shouldForceClineStream(params map[string]any, clientStream bool) bool {
 		return false
 	}
 	model, _ := params["model"].(string)
-	return strings.HasPrefix(model, "deepseek/")
+	return model == virtualFreeModel || strings.HasPrefix(model, "deepseek/") || strings.HasPrefix(model, "z-ai/glm-5.3")
 }
 
 func numericIndex(value any) int {

@@ -85,7 +85,7 @@ docker compose down        # 停止
 ```
 Base URL: http://127.0.0.1:3457/v1
 API Key:  <在管理后台生成的 Key>
-Model:    cline-free/glm-5.2
+Model:    z-ai/glm-5.3-flash
 ```
 
 兼容 OpenAI 和 Anthropic 两种 API 格式。
@@ -106,6 +106,8 @@ Model:    cline-free/glm-5.2
 Responses 流会把上游 `reasoning_content` 转换为标准 reasoning item 与 reasoning summary delta，并在后续 input 中恢复 reasoning history。代理会在提交客户端 SSE 前检查流初始化；遇到可恢复的 429、5xx、空流、首事件超时或提前 EOF 时最多切换一个账号重试一次。只有收到 `[DONE]` 或明确 `finish_reason` 才会标记完成；`length` / `content_filter` 返回 `response.incomplete`，无终止事件的 EOF 返回 `response.failed`。
 
 Chat Completions 对外只返回 OpenAI 标准字段；上游专用的 `reasoning_content`、计费字段与 provider metadata 不会泄漏。需要流式 reasoning 的客户端应使用 Responses。设置 `stream_options: {"include_usage": true}` 时，普通 chunk 的 `usage` 为 `null`，并在 `[DONE]` 前发送 `choices: []` 的最终 usage chunk。Chat 与 Responses 共享 30 秒首事件超时、模型级短暂冷却和最多一次换号重试。
+
+也可以请求虚拟模型 `free`：代理会依次尝试 `z-ai/glm-5.3-flash`、`deepseek/deepseek-v4-flash`、`cline-free/longcat-2.0`。每个模型最多尝试 2 个未冷却账号，整个请求最多 6 次上游初始化，避免免费池故障时产生无界重试；请求日志记录最终实际模型。
 
 现代 Codex 自定义 Provider 使用 Responses 协议。仓库内的 `codex-models.json` 提供 DeepSeek 与 GLM 的 1M 上下文、reasoning、shell 和 apply_patch 元数据，可避免 Codex 的 unknown-model 临时错误。示例 `~/.codex/config.toml`：
 
@@ -241,7 +243,7 @@ chmod 600 .cline-accounts.json .cline-request-logs.json .cline-zen.json
 - 默认模型可在「代理配置 → 默认模型」下拉中设置；未设置时自动回退到第一个免费模型
 
 > 内置 fallback 模型（离线/同步失败时兜底）：
-> `cline-free/glm-5.2`、`cline-pass/glm-5.2`、`cline-pass/deepseek-v4-flash`、`cline-pass/qwen3.7-max`、`deepseek/deepseek-v4-flash`、`poolside/laguna-s-2.1:free`
+> `z-ai/glm-5.3-flash`、`cline-free/longcat-2.0`、`cline-pass/glm-5.2`、`cline-pass/deepseek-v4-flash`、`cline-pass/qwen3.7-max`、`deepseek/deepseek-v4-flash`、`poolside/laguna-s-2.1:free`
 
 ## 项目结构
 

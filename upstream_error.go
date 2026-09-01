@@ -18,6 +18,18 @@ type upstreamResponseError struct {
 	statusCode int
 }
 
+type clineAccountUnavailableError struct {
+	err error
+}
+
+func (err *clineAccountUnavailableError) Error() string {
+	return err.err.Error()
+}
+
+func (err *clineAccountUnavailableError) Unwrap() error {
+	return err.err
+}
+
 func (err *upstreamResponseError) Error() string {
 	return err.message
 }

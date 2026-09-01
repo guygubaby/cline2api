@@ -20,15 +20,25 @@ import (
 )
 
 const (
-	defaultMaxTokens        = 128000
-	smallAuxiliaryMaxTokens = 256
-	fallbackDefaultModel    = "cline-free/glm-5.2"
+	defaultMaxTokens          = 128000
+	smallAuxiliaryMaxTokens   = 256
+	fallbackDefaultModel      = "z-ai/glm-5.3-flash"
+	virtualFreeModel          = "free"
+	freeModelPrimary          = "z-ai/glm-5.3-flash"
+	freeModelFallback         = "deepseek/deepseek-v4-flash"
+	freeModelLastResort       = "cline-free/longcat-2.0"
+	freeModelAttemptsPerModel = 2
 )
+
+// freeModelChain powers the virtual "free" model. Each model gets a small,
+// fixed account budget so an exhausted pool cannot multiply into unbounded retries.
+var freeModelChain = []string{freeModelPrimary, freeModelFallback, freeModelLastResort}
 
 // builtinModels 是内置默认模型列表（不可删除），仅作为离线 / 未同步时的 fallback。
 // 同步 Cline 官方推荐模型成功后，getAllModels 以远程模型为主。
 var builtinModels = []Model{
-	{ID: "cline-free/glm-5.2", Provider: "zai", Cost: "free", Status: "active", Custom: false},
+	{ID: "z-ai/glm-5.3-flash", Provider: "z-ai", Cost: "free", Status: "active", Custom: false},
+	{ID: "cline-free/longcat-2.0", Provider: "cline-free", Cost: "free", Status: "active", Custom: false},
 	{ID: "cline-pass/glm-5.2", Provider: "zai", Cost: "pass", Status: "active", Custom: false},
 	{ID: "cline-pass/deepseek-v4-flash", Provider: "deepseek", Cost: "pass", Status: "active", Custom: false},
 	{ID: "cline-pass/qwen3.7-max", Provider: "qwen", Cost: "pass", Status: "active", Custom: false},
@@ -447,8 +457,7 @@ func startProxy(host string, port int) error {
 			resp, err := callZenAPI(params, isStream)
 			if err != nil {
 				log.Printf("  api error: %v", err)
-				finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
-				writeOpenAIError(w, http.StatusBadGateway, "api_error", err.Error())
+				writeOpenAIUpstreamError(w, &reqLog, err)
 				return
 			}
 			defer resp.Body.Close()
@@ -473,15 +482,15 @@ func startProxy(host string, port int) error {
 			return
 		}
 
+		reqLog.Upstream = upstreamCline
 		if !isStream {
 			out, acc, err := callClineNonStream(params)
+			setRequestLogEffectiveModel(&reqLog, params)
 			if err != nil {
 				log.Printf("  api error: %v", err)
-				finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
-				writeOpenAIError(w, http.StatusBadGateway, "api_error", err.Error())
+				writeOpenAIUpstreamError(w, &reqLog, err)
 				return
 			}
-			reqLog.Upstream = upstreamCline
 			if acc != nil {
 				reqLog.AccountID = acc.AccountID
 				reqLog.AccountEmail = acc.Email
@@ -493,8 +502,8 @@ func startProxy(host string, port int) error {
 			return
 		}
 
-		reqLog.Upstream = upstreamCline
 		resp, acc, retryCount, err := callClineChatStream(params)
+		setRequestLogEffectiveModel(&reqLog, params)
 		reqLog.RetryCount = retryCount
 		if acc != nil {
 			reqLog.AccountID = acc.AccountID
@@ -719,6 +728,9 @@ func clineHeaders(token, sessionID string) http.Header {
 
 func callClineAPI(params map[string]any, stream bool) (*http.Response, *Account, error) {
 	model, _ := params["model"].(string)
+	if model == virtualFreeModel {
+		return callFreeClineAPI(params, stream)
+	}
 	acc := pickAccountForModel(model)
 	if acc == nil {
 		return nil, nil, fmt.Errorf("no active accounts available. Use --login or admin API to add accounts")
@@ -726,11 +738,35 @@ func callClineAPI(params map[string]any, stream bool) (*http.Response, *Account,
 	return callClineAPIWithAccount(acc, params, stream)
 }
 
+func callFreeClineAPI(params map[string]any, stream bool) (*http.Response, *Account, error) {
+	for _, model := range freeModelChain {
+		params["model"] = model
+		for attempt := 0; attempt < freeModelAttemptsPerModel; attempt++ {
+			account := pickAccountForModelStrict(model)
+			if account == nil {
+				break
+			}
+			response, usedAccount, err := callClineAPIWithAccount(account, params, stream)
+			if err == nil {
+				return response, usedAccount, nil
+			}
+			var accountErr *clineAccountUnavailableError
+			if errors.As(err, &accountErr) || upstreamErrorStatus(err) == http.StatusTooManyRequests {
+				continue
+			}
+			return nil, usedAccount, err
+		}
+	}
+	return nil, nil, newUpstreamHTTPError(
+		http.StatusTooManyRequests,
+		"no eligible accounts available for virtual free model",
+	)
+}
+
 func callClineAPIWithAccount(acc *Account, params map[string]any, stream bool) (*http.Response, *Account, error) {
 	token, err := ensureAccountToken(acc)
 	if err != nil {
-		// Try other accounts
-		return nil, acc, fmt.Errorf("account %s token failed: %w", acc.Email, err)
+		return nil, acc, &clineAccountUnavailableError{err: fmt.Errorf("account %s token failed: %w", acc.Email, err)}
 	}
 
 	body := buildUpstreamBody(params, stream)
@@ -761,7 +797,7 @@ func callClineAPIWithAccount(acc *Account, params map[string]any, stream bool) (
 		acc.Status = "cooldown"
 		acc.CooldownUntil = time.Now().Add(5 * time.Minute)
 		savePool()
-		return nil, acc, fmt.Errorf("upstream request: %w", err)
+		return nil, acc, &clineAccountUnavailableError{err: fmt.Errorf("upstream request: %w", err)}
 	}
 
 	if resp.StatusCode == 401 {
@@ -770,20 +806,24 @@ func callClineAPIWithAccount(acc *Account, params map[string]any, stream bool) (
 		if err := refreshAccountToken(acc); err == nil {
 			token = currentAccountAccessToken(acc)
 			req.Header = clineHeaders(token, sessionID)
+			req.Body = io.NopCloser(bytes.NewReader(bodyJSON))
 			resp, err = httpClient.Do(req)
 			if err != nil {
-				return nil, acc, fmt.Errorf("upstream retry: %w", err)
+				acc.Status = "cooldown"
+				acc.CooldownUntil = time.Now().Add(5 * time.Minute)
+				savePool()
+				return nil, acc, &clineAccountUnavailableError{err: fmt.Errorf("upstream retry: %w", err)}
 			}
 			if resp.StatusCode == 401 {
 				resp.Body.Close()
 				acc.Status = "expired"
 				savePool()
-				return nil, acc, fmt.Errorf("account %s token expired permanently", acc.Email)
+				return nil, acc, &clineAccountUnavailableError{err: fmt.Errorf("account %s token expired permanently", acc.Email)}
 			}
 		} else {
 			acc.Status = "expired"
 			savePool()
-			return nil, acc, fmt.Errorf("account %s refresh failed: %w", acc.Email, err)
+			return nil, acc, &clineAccountUnavailableError{err: fmt.Errorf("account %s refresh failed: %w", acc.Email, err)}
 		}
 	}
 
@@ -2074,8 +2114,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		resp, err := callZenAPI(openAIReq, req.Stream)
 		if err != nil {
 			log.Printf("  anthropic api error: %v", err)
-			finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
-			writeAnthropicError(w, http.StatusBadGateway, "api_error", err.Error())
+			writeAnthropicUpstreamError(w, &reqLog, tokenUsage{}, err)
 			return
 		}
 		defer resp.Body.Close()
@@ -2124,10 +2163,10 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 
 	if !req.Stream {
 		out, acc, err := callClineNonStream(openAIReq)
+		setRequestLogEffectiveModel(&reqLog, openAIReq)
 		if err != nil {
 			log.Printf("  anthropic api error: %v", err)
-			finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
-			writeAnthropicError(w, http.StatusBadGateway, "api_error", err.Error())
+			writeAnthropicUpstreamError(w, &reqLog, tokenUsage{}, err)
 			return
 		}
 		if acc != nil {
@@ -2150,6 +2189,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp, acc, diagnostic, err := callClineAnthropicStream(openAIReq)
+	setRequestLogEffectiveModel(&reqLog, openAIReq)
 	reqLog.RetryCount = diagnostic.RetryCount
 	if err != nil {
 		if acc != nil {
@@ -2164,8 +2204,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 			writeAnthropicSemanticEmpty(w, &reqLog, diagnostic, false)
 			return
 		}
-		finalizeRequestLog(&reqLog, diagnostic.Usage, time.Time{}, reqLog.StartedAt, false, err.Error())
-		writeAnthropicError(w, http.StatusBadGateway, "api_error", err.Error())
+		writeAnthropicUpstreamError(w, &reqLog, diagnostic.Usage, err)
 		return
 	}
 	defer resp.Body.Close()

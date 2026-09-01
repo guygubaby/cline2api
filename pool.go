@@ -307,6 +307,14 @@ func pickAccount() *Account {
 // 所有 active 账号对该模型都冷却时回退到普通 pickAccount（请求会得到模型级 429 提示）。
 // 空模型名等同于 pickAccount。
 func pickAccountForModel(model string) *Account {
+	return pickAccountForModelWithFallback(model, true)
+}
+
+func pickAccountForModelStrict(model string) *Account {
+	return pickAccountForModelWithFallback(model, false)
+}
+
+func pickAccountForModelWithFallback(model string, fallbackToActive bool) *Account {
 	if model == "" {
 		return pickAccount()
 	}
@@ -338,8 +346,11 @@ func pickAccountForModel(model string) *Account {
 	}
 
 	if len(eligible) == 0 {
-		// 全部冷却 → 回退普通轮询，请求会带出模型级错误
-		return pickAccountLocked(p)
+		if fallbackToActive {
+			// 普通模型保留旧行为，让上游返回准确的模型级错误。
+			return pickAccountLocked(p)
+		}
+		return nil
 	}
 
 	cfg := getProxyConfig()
