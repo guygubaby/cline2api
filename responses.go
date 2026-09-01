@@ -484,7 +484,7 @@ func applyResponsesCustomToolOutputs(response, request map[string]any) {
 // ============ 非流式响应转换 ============
 
 func newResponseID(prefix string) string {
-	return prefix + fmt.Sprintf("%x", time.Now().UnixNano())
+	return prefix + secureRandomHex(16)
 }
 
 // chatToResponses 将 chat.completions 响应转换为 Responses 响应。
@@ -1225,9 +1225,11 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 	isStream, _ := params["stream"].(bool)
 	log.Printf("  responses: model=%s stream=%v", model, isStream)
 
-	reqLog := RequestLog{StartedAt: time.Now(), Protocol: "responses", Model: model, Stream: isStream}
+	reqLog := newRequestLog("responses", model, isStream)
 
 	chat := responsesToChat(params)
+	attachRequestIsolation(chat, reqLog.ID, requestTenantScope(r))
+	setRequestLogIsolationMetadata(&reqLog, chat)
 	chatModel, _ := chat["model"].(string)
 	route := resolveModelRoute(chatModel)
 
@@ -1244,7 +1246,8 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 	case modelRouteZen:
 		reqLog.Upstream = upstreamOpenCode
 		zm, _ := resolveZenInfo(chatModel)
-		out := maybeCompact(chat, zm, requestSessionID(chat, r.Header))
+		rawSessionID := requestSessionID(chat, r.Header)
+		out := maybeCompact(chat, zm, namespaceCompactSessionID(requestTenantScope(r), rawSessionID))
 		if out.changed {
 			log.Printf("  responses %s", out.note)
 		}
@@ -1292,6 +1295,7 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 		if !isStream {
 			out, acc, err := callClineNonStream(chat)
 			setRequestLogEffectiveModel(&reqLog, chat)
+			setRequestLogIsolationMetadata(&reqLog, chat)
 			if err != nil {
 				log.Printf("  responses api error: %v", err)
 				writeOpenAIUpstreamError(w, &reqLog, err)
@@ -1314,6 +1318,7 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 		upResp, acc, retryCount, err := callClineResponsesStream(chat)
 		setRequestLogEffectiveModel(&reqLog, chat)
 		reqLog.RetryCount = retryCount
+		setRequestLogIsolationMetadata(&reqLog, chat)
 		if err != nil {
 			log.Printf("  responses api error: %v", err)
 			if acc != nil {

@@ -41,6 +41,7 @@ func TestCline401RetryReplaysOriginalRequestBody(t *testing.T) {
 
 	oldHTTPClient := httpClient
 	var requestBodies [][]byte
+	var taskIDs []string
 	refreshCalls := 0
 	httpClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		switch request.URL.Path {
@@ -54,6 +55,7 @@ func TestCline401RetryReplaysOriginalRequestBody(t *testing.T) {
 				Header: http.Header{}, Request: request,
 			}, nil
 		case "/api/v1/chat/completions":
+			taskIDs = append(taskIDs, request.Header.Get("X-Task-ID"))
 			body, err := io.ReadAll(request.Body)
 			if err != nil {
 				return nil, err
@@ -88,6 +90,16 @@ func TestCline401RetryReplaysOriginalRequestBody(t *testing.T) {
 	}
 	if len(requestBodies[0]) == 0 || string(requestBodies[0]) != string(requestBodies[1]) {
 		t.Fatalf("retry request body was not replayed: first=%q second=%q", requestBodies[0], requestBodies[1])
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(requestBodies[0], &decoded); err != nil {
+		t.Fatalf("decode replayed body: %v", err)
+	}
+	if _, exists := decoded["session_id"]; exists {
+		t.Fatalf("undocumented session_id reached Cline: %#v", decoded)
+	}
+	if len(taskIDs) != 2 || taskIDs[0] == "" || taskIDs[0] != taskIDs[1] {
+		t.Fatalf("401 retry task IDs = %#v, want one stable logical task ID", taskIDs)
 	}
 }
 

@@ -109,6 +109,8 @@ Chat Completions 对外只返回 OpenAI 标准字段；上游专用的 `reasonin
 
 也可以请求虚拟模型 `free`：代理会依次尝试 `z-ai/glm-5.3-flash`、`deepseek/deepseek-v4-flash`、`cline-free/longcat-2.0`。每个模型最多尝试 2 个未冷却账号，整个请求最多 6 次上游初始化，避免免费池故障时产生无界重试；请求日志记录最终实际模型。
 
+多用户隔离：发往 Cline 的 `X-Task-ID` 使用 128 位安全随机数，且不再发送未公开的 body `session_id`。Zen 压缩状态、客户端缓存键与 user 标识按下游 API Key 的不可逆租户摘要隔离；未配置 API Key 时禁用跨请求共享状态。审计日志只记录随机 request/task ID 和带进程随机密钥的 HMAC-SHA256，不记录提示词或响应正文。不同人员或应用必须使用不同 API Key；账号池仍由实例全局共享，敏感多租户场景还应使用独立实例/账号池。
+
 现代 Codex 自定义 Provider 使用 Responses 协议。仓库内的 `codex-models.json` 提供 DeepSeek 与 GLM 的 1M 上下文、reasoning、shell 和 apply_patch 元数据，可避免 Codex 的 unknown-model 临时错误。示例 `~/.codex/config.toml`：
 
 ```bash

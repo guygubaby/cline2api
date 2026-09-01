@@ -462,7 +462,7 @@ func doFullCapture() error {
 			"X-PLATFORM":         "terminal",
 			"X-PLATFORM-VERSION": "3.0.47",
 			"X-CORE-VERSION":     "0.0.66",
-			"X-Task-ID":          "sess_" + fmt.Sprintf("%d", time.Now().UnixMilli()),
+			"X-Task-ID":          newUpstreamTaskID(),
 		},
 	)
 	if err != nil {

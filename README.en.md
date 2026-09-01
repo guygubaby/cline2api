@@ -108,6 +108,8 @@ Chat Completions exposes only standard OpenAI fields; upstream-only `reasoning_c
 
 You may also request the virtual `free` model. It tries `z-ai/glm-5.3-flash`, `deepseek/deepseek-v4-flash`, then `cline-free/longcat-2.0`. Each model is limited to two non-cooling accounts, for at most six upstream initializations per request, preventing unbounded retries during a free-pool outage. Request logs store the effective model.
 
+Multi-user isolation: Cline `X-Task-ID` values use 128 bits of secure randomness and the proxy no longer sends the undocumented body `session_id`. Zen compaction state, client cache keys, and user identifiers are namespaced by a non-reversible tenant digest of the downstream API key; cross-request shared state is disabled when no API key is configured. Audit logs contain only random request/task IDs and per-process-keyed HMAC-SHA256 values, never prompt or response text. Give each person/application a distinct API key. The account pool remains global to an instance, so sensitive multi-tenant deployments should also use separate instances/account pools.
+
 Current Codex custom providers use the Responses protocol. The included `codex-models.json` supplies 1M-context, reasoning, shell, and apply_patch metadata for DeepSeek and GLM, avoiding Codex's temporary unknown-model error. Example `~/.codex/config.toml`:
 
 ```bash

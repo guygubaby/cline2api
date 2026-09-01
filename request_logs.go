@@ -46,6 +46,8 @@ type RequestLog struct {
 	FinishReason    string  `json:"finishReason,omitempty"`
 	SawDone         bool    `json:"sawDone,omitempty"`
 	RetryCount      int     `json:"retryCount,omitempty"`
+	RequestHMAC     string  `json:"requestHmac,omitempty"`
+	UpstreamTaskID  string  `json:"upstreamTaskId,omitempty"`
 	ReasoningChars  int     `json:"reasoningChars,omitempty"`
 	ThinkingTokens  int64   `json:"thinkingTokens,omitempty"`
 	RetrySuppressed bool    `json:"retrySuppressed,omitempty"`
@@ -56,6 +58,16 @@ var (
 	requestLogsMu   sync.Mutex
 	requestLogsPath string
 )
+
+func newRequestLog(protocol, model string, stream bool) RequestLog {
+	return RequestLog{
+		ID:        newProxyRequestID(),
+		StartedAt: time.Now(),
+		Protocol:  protocol,
+		Model:     model,
+		Stream:    stream,
+	}
+}
 
 func init() {
 	requestLogsPath = resolveDataPath(".cline-request-logs.json")
@@ -128,6 +140,17 @@ func setRequestLogEffectiveModel(entry *RequestLog, params map[string]any) {
 	}
 	if model, _ := params["model"].(string); model != "" {
 		entry.Model = model
+	}
+}
+
+func setRequestLogIsolationMetadata(entry *RequestLog, params map[string]any) {
+	if entry == nil {
+		return
+	}
+	entry.RequestHMAC = canonicalRequestAuditHash(params)
+	entry.UpstreamTaskID, _ = params[proxyUpstreamTaskParamKey].(string)
+	if attempts, _ := params[proxyUpstreamCountParamKey].(int); attempts > 1 && entry.RetryCount < attempts-1 {
+		entry.RetryCount = attempts - 1
 	}
 }
 

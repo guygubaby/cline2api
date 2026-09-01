@@ -2,7 +2,9 @@
 
 Date: 2026-09-01
 Scope: Claude Code -> `cline2api` -> Cline Chat Completions -> `deepseek/deepseek-v4-flash`
-Method: local session evidence, current repository source/tests, and first-party Anthropic/Cline documentation. No production code was changed.
+Original audit method: local session evidence, repository source/tests, and first-party Anthropic/Cline documentation. The first audit pass changed no production code.
+
+> Remediation update: the isolation fixes recommended below were implemented after the original audit. Production remains exposed until the updated binary is deployed and downstream keys are rotated.
 
 ## Executive conclusion
 
@@ -121,6 +123,28 @@ The incident did not reproduce in this small sample. That does not invalidate th
 3. Add an operator-visible security alert if two in-flight attempts ever share an upstream task ID, or if a response matches another live request's canary during synthetic monitoring.
 4. Repeat the production canary after the ID fix with all requests completing successfully. A passing sample reduces risk but cannot prove Cline/DeepSeek internals; upstream confirmation remains necessary.
 
+## Remediation implemented
+
+The proxy now:
+
+- generates every Cline `X-Task-ID`, proxy request ID, Anthropic message ID, and Responses object ID with at least 128 bits from `crypto/rand`;
+- no longer sends the undocumented body `session_id` to Cline;
+- uses a new upstream task ID for each account/model attempt while retaining one proxy request ID for correlation;
+- namespaces Zen compaction state and client-supplied `prompt_cache_key`, `user`, and `safety_identifier` values by a non-reversible API-key tenant scope;
+- disables cross-request shared state when no API key is configured, because no stable tenant boundary exists;
+- records request-history and response-prefix HMAC-SHA256 values using a per-process random key, never prompt/response text;
+- records the final upstream task ID and actual attempt count in request logs;
+- includes concurrency regressions for 10,000 random task IDs, cross-key compaction state, cache-key namespacing, response-log secrecy, and 401 request replay.
+
+The updated local build accepted Chat Completions, Responses, and Anthropic Messages requests without body `session_id`. A post-fix 16-request concurrent canary produced 15 HTTP 200 responses and one HTTP 502; all 15 successful responses returned only their own canary. The 16 proxy request IDs and 16 final upstream task IDs were unique, including six account retries.
+
+Residual risks remain:
+
+- callers that share one downstream API key intentionally share one tenant namespace; issue a distinct key per person/application;
+- all tenants still use credentials from the global Cline account pool, so only Cline/DeepSeek can confirm their account-level cache isolation;
+- the canary did not reproduce the leak and cannot prove an opaque upstream is safe;
+- existing production processes and historical containers keep the old behavior until rebuilt and restarted.
+
 ## Final assessment
 
-There is enough evidence to say **the user observed real unintended context contamination**, not merely an ordinary Claude Code resume. There is not enough evidence to name the original owner of the context or definitively attribute the bug to this proxy versus Cline/DeepSeek. The proxy's non-unique upstream task/session ID is independently unsafe and should be fixed first; the shared Zen compaction namespace should be hardened at the same time. Until those changes and upstream tracing are complete, the Cline DeepSeek route should not be considered suitable for sensitive multi-user workloads.
+There is enough evidence to say **the user observed real unintended context contamination**, not merely an ordinary Claude Code resume. There is not enough evidence to name the original owner of the context or definitively attribute the bug to this proxy versus Cline/DeepSeek. The known proxy isolation defects are now repaired locally, but production deployment and upstream tracing remain mandatory. Until Cline/DeepSeek confirms account/cache isolation and the deployed canary remains clean, the route should not be considered suitable for sensitive multi-user workloads.

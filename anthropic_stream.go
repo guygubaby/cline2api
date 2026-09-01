@@ -57,7 +57,7 @@ func semanticRequestFingerprint(params map[string]any) string {
 	hash := sha256.New()
 	encoder := json.NewEncoder(hash)
 	encoder.SetEscapeHTML(false)
-	if err := encoder.Encode(params); err != nil {
+	if err := encoder.Encode(requestParamsWithoutInternalMetadata(params)); err != nil {
 		return ""
 	}
 	return hex.EncodeToString(hash.Sum(nil))

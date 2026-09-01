@@ -342,7 +342,7 @@ func startProxy(host string, port int) error {
 			// Allow requests without key if no keys configured
 			p := loadPool()
 			if len(p.Keys) == 0 {
-				next(w, r)
+				next(w, requestWithTenantScope(r, ""))
 				return
 			}
 
@@ -370,7 +370,7 @@ func startProxy(host string, port int) error {
 				}
 				return
 			}
-			next(w, r)
+			next(w, requestWithTenantScope(r, key))
 		})
 	}
 
@@ -400,7 +400,7 @@ func startProxy(host string, port int) error {
 
 		isStream, _ := params["stream"].(bool)
 		model, _ := params["model"].(string)
-		reqLog := RequestLog{StartedAt: time.Now(), Protocol: "openai", Model: model, Stream: isStream}
+		reqLog := newRequestLog("openai", model, isStream)
 		if err := validateChatCompletionRequest(params); err != nil {
 			finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
 			writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
@@ -433,6 +433,8 @@ func startProxy(host string, port int) error {
 				}
 			}
 		}
+		attachRequestIsolation(params, reqLog.ID, requestTenantScope(r))
+		setRequestLogIsolationMetadata(&reqLog, params)
 
 		// 按 model 自动分流：zen 免费模型 / zen 付费拒绝 / 其余走 Cline 池
 		route := resolveModelRoute(model)
@@ -450,7 +452,8 @@ func startProxy(host string, port int) error {
 		case modelRouteZen:
 			reqLog.Upstream = upstreamOpenCode
 			zm, _ := resolveZenInfo(model)
-			out := maybeCompact(params, zm, requestSessionID(params, r.Header))
+			rawSessionID := requestSessionID(params, r.Header)
+			out := maybeCompact(params, zm, namespaceCompactSessionID(requestTenantScope(r), rawSessionID))
 			if out.changed {
 				log.Printf("  chat %s", out.note)
 			}
@@ -486,6 +489,7 @@ func startProxy(host string, port int) error {
 		if !isStream {
 			out, acc, err := callClineNonStream(params)
 			setRequestLogEffectiveModel(&reqLog, params)
+			setRequestLogIsolationMetadata(&reqLog, params)
 			if err != nil {
 				log.Printf("  api error: %v", err)
 				writeOpenAIUpstreamError(w, &reqLog, err)
@@ -505,6 +509,7 @@ func startProxy(host string, port int) error {
 		resp, acc, retryCount, err := callClineChatStream(params)
 		setRequestLogEffectiveModel(&reqLog, params)
 		reqLog.RetryCount = retryCount
+		setRequestLogIsolationMetadata(&reqLog, params)
 		if acc != nil {
 			reqLog.AccountID = acc.AccountID
 			reqLog.AccountEmail = acc.Email
@@ -649,8 +654,6 @@ func integerTokenLimit(value any) (int, bool) {
 }
 
 func buildUpstreamBody(params map[string]any, stream bool) map[string]any {
-	sessionID := fmt.Sprintf("sess_%d", time.Now().UnixMilli())
-
 	maxTokens := defaultMaxTokens
 	if value, ok := integerTokenLimit(params["max_tokens"]); ok {
 		maxTokens = value
@@ -666,7 +669,6 @@ func buildUpstreamBody(params map[string]any, stream bool) map[string]any {
 	body := map[string]any{
 		"model":      model,
 		"max_tokens": maxTokens,
-		"session_id": sessionID,
 	}
 
 	if msgsRaw, ok := params["messages"]; ok {
@@ -712,11 +714,11 @@ func buildUpstreamBody(params map[string]any, stream bool) map[string]any {
 	return body
 }
 
-func clineHeaders(token, sessionID string) http.Header {
+func clineHeaders(token, taskID string) http.Header {
 	h := http.Header{}
 	h.Set("Authorization", "Bearer "+token)
 	h.Set("Content-Type", "application/json")
-	h.Set("X-Task-ID", sessionID)
+	h.Set("X-Task-ID", taskID)
 
 	cfg := getProxyConfig()
 	for k, v := range cfg.Headers {
@@ -770,7 +772,9 @@ func callClineAPIWithAccount(acc *Account, params map[string]any, stream bool) (
 	}
 
 	body := buildUpstreamBody(params, stream)
-	sessionID, _ := body["session_id"].(string)
+	taskID := newUpstreamTaskID()
+	recordUpstreamAttempt(params, taskID)
+	requestID, requestHash := proxyRequestAuditFields(params)
 
 	bodyJSON, err := json.Marshal(body)
 	if err != nil {
@@ -781,7 +785,7 @@ func callClineAPIWithAccount(acc *Account, params map[string]any, stream bool) (
 	if err != nil {
 		return nil, acc, fmt.Errorf("create request: %w", err)
 	}
-	req.Header = clineHeaders(token, sessionID)
+	req.Header = clineHeaders(token, taskID)
 
 	toolCount := 0
 	if tools, ok := params["tools"]; ok {
@@ -789,31 +793,36 @@ func callClineAPIWithAccount(acc *Account, params map[string]any, stream bool) (
 			toolCount = len(t)
 		}
 	}
-	log.Printf("  upstream: account=%s stream=%v tools=%d msgs=%d max_tokens=%v effort=%v thinking=%v",
-		truncateEmail(acc.Email), stream, toolCount, getMsgCount(params), body["max_tokens"], body["reasoning_effort"], body["thinking"])
+	log.Printf("  upstream: request=%s task=%s request_hmac_sha256=%s account=%s stream=%v tools=%d msgs=%d max_tokens=%v effort=%v thinking=%v",
+		requestID, taskID, requestHash, truncateEmail(acc.Email), stream, toolCount, getMsgCount(params),
+		body["max_tokens"], body["reasoning_effort"], body["thinking"])
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
+		log.Printf("  upstream audit: request=%s task=%s response_prefix_hmac_sha256=none error=transport", requestID, taskID)
 		acc.Status = "cooldown"
 		acc.CooldownUntil = time.Now().Add(5 * time.Minute)
 		savePool()
 		return nil, acc, &clineAccountUnavailableError{err: fmt.Errorf("upstream request: %w", err)}
 	}
 
+	resp = wrapAuditedResponse(resp, requestID, taskID)
 	if resp.StatusCode == 401 {
 		resp.Body.Close()
 		// Refresh token and retry
 		if err := refreshAccountToken(acc); err == nil {
 			token = currentAccountAccessToken(acc)
-			req.Header = clineHeaders(token, sessionID)
+			req.Header = clineHeaders(token, taskID)
 			req.Body = io.NopCloser(bytes.NewReader(bodyJSON))
 			resp, err = httpClient.Do(req)
 			if err != nil {
+				log.Printf("  upstream audit: request=%s task=%s response_prefix_hmac_sha256=none error=retry_transport", requestID, taskID)
 				acc.Status = "cooldown"
 				acc.CooldownUntil = time.Now().Add(5 * time.Minute)
 				savePool()
 				return nil, acc, &clineAccountUnavailableError{err: fmt.Errorf("upstream retry: %w", err)}
 			}
+			resp = wrapAuditedResponse(resp, requestID, taskID)
 			if resp.StatusCode == 401 {
 				resp.Body.Close()
 				acc.Status = "expired"
@@ -2083,13 +2092,14 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		req.MaxTokens = &maxTokens
 	}
 
+	reqLog := newRequestLog("anthropic", req.Model, req.Stream)
 	openAIReq := anthropicToOpenAI(req)
+	attachRequestIsolation(openAIReq, reqLog.ID, requestTenantScope(r))
+	setRequestLogIsolationMetadata(&reqLog, openAIReq)
 	estimatedInputTokens := estimateChatInputTokens(openAIReq)
 
 	log.Printf("  anthropic: model=%s stream=%v msgs=%d history_reasoning_chars=%d",
 		req.Model, req.Stream, len(req.Messages), reasoningHistoryChars(openAIReq))
-
-	reqLog := RequestLog{StartedAt: time.Now(), Protocol: "anthropic", Model: req.Model, Stream: req.Stream}
 
 	// 按 model 自动分流（与 chat 端点一致）：zen 免费/付费拒绝/Cline 池
 	route := resolveModelRoute(req.Model)
@@ -2107,7 +2117,8 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	case modelRouteZen:
 		reqLog.Upstream = upstreamOpenCode
 		zm, _ := resolveZenInfo(req.Model)
-		out := maybeCompact(openAIReq, zm, requestSessionID(map[string]any{"session_id": r.Header.Get("x-opencode-session")}, nil))
+		rawSessionID := r.Header.Get("x-opencode-session")
+		out := maybeCompact(openAIReq, zm, namespaceCompactSessionID(requestTenantScope(r), rawSessionID))
 		if out.changed {
 			log.Printf("  anthropic %s", out.note)
 		}
@@ -2164,6 +2175,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	if !req.Stream {
 		out, acc, err := callClineNonStream(openAIReq)
 		setRequestLogEffectiveModel(&reqLog, openAIReq)
+		setRequestLogIsolationMetadata(&reqLog, openAIReq)
 		if err != nil {
 			log.Printf("  anthropic api error: %v", err)
 			writeAnthropicUpstreamError(w, &reqLog, tokenUsage{}, err)
@@ -2191,6 +2203,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	resp, acc, diagnostic, err := callClineAnthropicStream(openAIReq)
 	setRequestLogEffectiveModel(&reqLog, openAIReq)
 	reqLog.RetryCount = diagnostic.RetryCount
+	setRequestLogIsolationMetadata(&reqLog, openAIReq)
 	if err != nil {
 		if acc != nil {
 			reqLog.AccountID = acc.AccountID
@@ -2297,7 +2310,7 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 		flusher.Flush()
 	}
 
-	msgID := "msg_" + fmt.Sprintf("%x", time.Now().UnixMilli())
+	msgID := "msg_" + secureRandomHex(16)
 	stopReason := "end_turn"
 	emit("message_start", map[string]any{
 		"type": "message_start",
