@@ -96,21 +96,60 @@ func TestOpenAIToAnthropicIncludesThinkingBeforeToolUse(t *testing.T) {
 	}
 }
 
-func TestPrepareSemanticChatStreamRejectsReasoningOnlyOutput(t *testing.T) {
-	body := strings.Join([]string{
-		`data: {"choices":[{"delta":{"reasoning_content":"thinking only"}}]}`,
-		`data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":1,"total_tokens":101,"completion_tokens_details":{"reasoning_tokens":0}}}`,
-		`data: [DONE]`,
-		``,
-	}, "\n")
-	response := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body))}
-
-	_, diagnostic, err := prepareSemanticChatStream(response)
-	if !errors.Is(err, errEmptyResponseContent) {
-		t.Fatalf("reasoning-only stream error = %v", err)
+func TestPrepareSemanticChatStreamReleasesOnFirstReasoningDelta(t *testing.T) {
+	reader, writer := io.Pipe()
+	response := &http.Response{StatusCode: http.StatusOK, Body: reader}
+	type prepareResult struct {
+		response   *http.Response
+		diagnostic semanticStreamDiagnostic
+		err        error
 	}
-	if diagnostic.ReasoningChars != len("thinking only") || diagnostic.FinishReason != "stop" || diagnostic.Usage.Completion != 1 {
-		t.Fatalf("empty-stream diagnostic = %#v", diagnostic)
+	resultCh := make(chan prepareResult, 1)
+	go func() {
+		prepared, diagnostic, err := prepareSemanticChatStream(response)
+		resultCh <- prepareResult{response: prepared, diagnostic: diagnostic, err: err}
+	}()
+
+	reasoningLine := `data: {"choices":[{"delta":{"reasoning_content":"thinking now"}}]}` + "\n"
+	if _, err := writer.Write([]byte(reasoningLine)); err != nil {
+		t.Fatalf("write reasoning delta: %v", err)
+	}
+
+	var result prepareResult
+	select {
+	case result = <-resultCh:
+	case <-time.After(250 * time.Millisecond):
+		_ = writer.CloseWithError(errors.New("test timeout"))
+		<-resultCh
+		t.Fatal("reasoning delta was buffered instead of being released immediately")
+	}
+	_ = writer.Close()
+	if result.err != nil {
+		t.Fatalf("prepare reasoning stream: %v", result.err)
+	}
+	if result.diagnostic.ReasoningChars != len("thinking now") {
+		t.Fatalf("reasoning diagnostic = %#v", result.diagnostic)
+	}
+	replayed, err := io.ReadAll(result.response.Body)
+	if err != nil {
+		t.Fatalf("read reasoning stream: %v", err)
+	}
+	if string(replayed) != reasoningLine {
+		t.Fatalf("reasoning replay = %q, want %q", replayed, reasoningLine)
+	}
+}
+
+func TestPrepareSemanticChatStreamTimesOutWithoutSemanticOutput(t *testing.T) {
+	reader, writer := io.Pipe()
+	t.Cleanup(func() { _ = writer.Close() })
+	response := &http.Response{StatusCode: http.StatusOK, Body: reader}
+
+	_, diagnostic, err := prepareSemanticChatStreamWithTimeout(response, 20*time.Millisecond)
+	if !errors.Is(err, errAnthropicFirstEventTimeout) {
+		t.Fatalf("first-event timeout error = %v", err)
+	}
+	if diagnostic.ReasoningChars != 0 {
+		t.Fatalf("timeout diagnostic = %#v", diagnostic)
 	}
 }
 
@@ -164,7 +203,7 @@ func TestCallClineAnthropicStreamRetriesOneAlternativeAfterEmptyOutput(t *testin
 	httpClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		requestCount++
 		body := strings.Join([]string{
-			`data: {"choices":[{"delta":{"reasoning_content":"thinking only"},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":1,"total_tokens":101}}`,
+			`data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":1,"total_tokens":101}}`,
 			`data: [DONE]`,
 			``,
 		}, "\n")
@@ -201,7 +240,7 @@ func TestCallClineAnthropicStreamRetriesOneAlternativeAfterEmptyOutput(t *testin
 	if account != secondAccount {
 		t.Fatalf("retry account = %#v, want second account", account)
 	}
-	if diagnostic.ReasoningChars != len("inspect first") {
+	if diagnostic.ReasoningChars != len("inspect first") || diagnostic.RetryCount != 1 {
 		t.Fatalf("retry diagnostic = %#v", diagnostic)
 	}
 	replayed, err := io.ReadAll(prepared.Body)
@@ -210,6 +249,82 @@ func TestCallClineAnthropicStreamRetriesOneAlternativeAfterEmptyOutput(t *testin
 	}
 	if !strings.Contains(string(replayed), `"name":"Read"`) {
 		t.Fatalf("prepared retry stream lost the tool call: %s", replayed)
+	}
+}
+
+func TestCallClineAnthropicStreamCoolsDownAccountAfterFirstEventTimeout(t *testing.T) {
+	firstAccount := &Account{
+		AccountID: "slow", Email: "slow@example.com", AccessToken: "workos:slow",
+		ExpiresAt: time.Now().Add(time.Hour).UnixMilli(), Status: "active", ModelCooldowns: map[string]time.Time{},
+	}
+	secondAccount := &Account{
+		AccountID: "fast", Email: "fast@example.com", AccessToken: "workos:fast",
+		ExpiresAt: time.Now().Add(time.Hour).UnixMilli(), Status: "active", ModelCooldowns: map[string]time.Time{},
+	}
+	currentPool := loadPool()
+	poolMu.Lock()
+	oldAccounts, oldIndex := currentPool.Accounts, currentPool.CurrentIdx
+	currentPool.Accounts = []*Account{firstAccount, secondAccount}
+	currentPool.CurrentIdx = 0
+	poolMu.Unlock()
+	t.Cleanup(func() {
+		poolMu.Lock()
+		currentPool.Accounts = oldAccounts
+		currentPool.CurrentIdx = oldIndex
+		poolMu.Unlock()
+		savePool()
+	})
+
+	oldHTTPClient := httpClient
+	requestCount := 0
+	var blockedWriter *io.PipeWriter
+	httpClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requestCount++
+		if requestCount == 1 {
+			reader, writer := io.Pipe()
+			blockedWriter = writer
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       reader,
+				Request:    request,
+			}, nil
+		}
+		body := strings.Join([]string{
+			`data: {"choices":[{"delta":{"reasoning_content":"ready"}}]}`,
+			`data: [DONE]`,
+			``,
+		}, "\n")
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    request,
+		}, nil
+	})}
+	t.Cleanup(func() {
+		httpClient = oldHTTPClient
+		if blockedWriter != nil {
+			_ = blockedWriter.Close()
+		}
+	})
+
+	model := "deepseek/deepseek-v4-flash"
+	prepared, account, diagnostic, err := callClineAnthropicStreamWithTimeout(map[string]any{
+		"model":      model,
+		"max_tokens": float64(128000),
+		"stream":     true,
+		"messages":   []any{map[string]any{"role": "user", "content": "Inspect the project."}},
+	}, 20*time.Millisecond)
+	if err != nil {
+		t.Fatalf("retry after first-event timeout: %v", err)
+	}
+	defer prepared.Body.Close()
+	if requestCount != 2 || account != secondAccount || diagnostic.RetryCount != 1 {
+		t.Fatalf("timeout retry result: requests=%d account=%#v diagnostic=%#v", requestCount, account, diagnostic)
+	}
+	if until := firstAccount.ModelCooldowns[model]; !until.After(time.Now()) {
+		t.Fatalf("slow account was not cooled down: %#v", firstAccount.ModelCooldowns)
 	}
 }
 
@@ -251,8 +366,7 @@ func TestAnthropicRepeatedSemanticEmptyIsNonRetryableAndCircuitBroken(t *testing
 	httpClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		requestCount++
 		body := strings.Join([]string{
-			`data: {"choices":[{"delta":{"reasoning_content":"thinking only"}}]}`,
-			`data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":23000,"completion_tokens":1,"total_tokens":23001,"completion_tokens_details":{"reasoning_tokens":1}}}`,
+			`data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":23000,"completion_tokens":0,"total_tokens":23000,"completion_tokens_details":{"reasoning_tokens":0}}}`,
 			`data: [DONE]`,
 			``,
 		}, "\n")
@@ -306,11 +420,37 @@ func TestAnthropicRepeatedSemanticEmptyIsNonRetryableAndCircuitBroken(t *testing
 		t.Fatalf("read semantic-empty request log: page=%#v err=%v", page, err)
 	}
 	entry := page.Items[0]
-	if entry.ErrorCode != semanticEmptyErrorCode || entry.FinishReason != "stop" || entry.ReasoningChars != len("thinking only") {
+	if entry.ErrorCode != semanticEmptyErrorCode || entry.FinishReason != "stop" || entry.ReasoningChars != 0 {
 		t.Fatalf("semantic-empty diagnostics missing: %#v", entry)
 	}
-	if entry.ThinkingTokens != 1 || !entry.RetrySuppressed || entry.Upstream != upstreamCline {
+	if entry.ThinkingTokens != 0 || !entry.RetrySuppressed || entry.Upstream != upstreamCline {
 		t.Fatalf("semantic-empty suppression metadata missing: %#v", entry)
+	}
+}
+
+func TestHandleAnthropicStreamTreatsReasoningAsFirstOutput(t *testing.T) {
+	upstreamBody := strings.Join([]string{
+		`data: {"choices":[{"delta":{"reasoning_content":"thinking only"}}]}`,
+		`data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":8,"total_tokens":108,"completion_tokens_details":{"reasoning_tokens":8}}}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	upstream := &http.Response{Body: io.NopCloser(strings.NewReader(upstreamBody))}
+	recorder := httptest.NewRecorder()
+	reqLog := &RequestLog{StartedAt: time.Now().Add(-time.Second), Protocol: "anthropic", Model: "m1", Stream: true}
+
+	handleAnthropicStream(recorder, upstream, nil, reqLog, 100)
+
+	events := decodeSSEEvents(t, recorder.Body.String())
+	firstContentBlockStartOfType(t, events, "thinking")
+	firstEventOfType(t, events, "message_stop")
+	for _, event := range events {
+		if event["type"] == "error" {
+			t.Fatalf("reasoning-only stream ended with an error: %#v", event)
+		}
+	}
+	if reqLog.UpstreamTTFTMs <= 0 || reqLog.ThinkingTTFTMs <= 0 || reqLog.VisibleTTFTMs != 0 {
+		t.Fatalf("reasoning latency metrics = %#v", reqLog)
 	}
 }
 

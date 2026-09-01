@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -20,13 +21,18 @@ const (
 	semanticEmptyCircuitTTL        = 2 * time.Minute
 	semanticEmptyCircuitMaxEntries = 1024
 	semanticEmptyErrorCode         = "semantic_empty"
-	semanticEmptyClientHint        = "upstream returned no usable text or tool call after retry; compact this conversation with /compact or start a new session with /clear"
+	semanticEmptyClientHint        = "upstream returned no reasoning, text, or tool call after retry; compact this conversation with /compact or start a new session with /clear"
+	anthropicFirstEventTimeout     = 30 * time.Second
+	anthropicSlowAccountCooldown   = time.Minute
 )
+
+var errAnthropicFirstEventTimeout = errors.New("upstream produced no Anthropic output event before timeout")
 
 type semanticStreamDiagnostic struct {
 	ReasoningChars int
 	FinishReason   string
 	Usage          tokenUsage
+	RetryCount     int
 }
 
 type semanticEmptyCircuitEntry struct {
@@ -150,7 +156,10 @@ func inspectSemanticChatEvent(event map[string]any, diagnostic *semanticStreamDi
 		if delta == nil {
 			continue
 		}
-		diagnostic.ReasoningChars += len([]rune(reasoningContent(delta)))
+		if reasoning := reasoningContent(delta); reasoning != "" {
+			diagnostic.ReasoningChars += len([]rune(reasoning))
+			return true, nil
+		}
 		if content, _ := delta["content"].(string); strings.TrimSpace(content) != "" {
 			return true, nil
 		}
@@ -161,17 +170,30 @@ func inspectSemanticChatEvent(event map[string]any, diagnostic *semanticStreamDi
 	return false, nil
 }
 
-// prepareSemanticChatStream buffers only until the upstream produces visible
-// content or a tool call. This keeps successful requests streaming while
-// allowing reasoning-only/empty streams to be retried before client SSE
-// headers are committed.
+// prepareSemanticChatStream buffers only until the upstream produces reasoning,
+// visible content, or a tool call. Reasoning is valid Anthropic thinking output,
+// so holding it until visible text defeats real-time streaming. Completely empty
+// streams are still rejected before client SSE headers are committed.
 func prepareSemanticChatStream(response *http.Response) (*http.Response, semanticStreamDiagnostic, error) {
+	return prepareSemanticChatStreamWithTimeout(response, anthropicFirstEventTimeout)
+}
+
+func prepareSemanticChatStreamWithTimeout(response *http.Response, timeout time.Duration) (*http.Response, semanticStreamDiagnostic, error) {
 	var diagnostic semanticStreamDiagnostic
 	if response == nil || response.Body == nil {
 		return nil, diagnostic, fmt.Errorf("upstream response body is missing")
 	}
 
 	originalBody := response.Body
+	var timedOut atomic.Bool
+	var timer *time.Timer
+	if timeout > 0 {
+		timer = time.AfterFunc(timeout, func() {
+			timedOut.Store(true)
+			_ = originalBody.Close()
+		})
+		defer timer.Stop()
+	}
 	reader := bufio.NewReader(originalBody)
 	var replay bytes.Buffer
 	for {
@@ -208,6 +230,9 @@ func prepareSemanticChatStream(response *http.Response) (*http.Response, semanti
 		}
 		if readErr != nil {
 			_ = originalBody.Close()
+			if timedOut.Load() {
+				return nil, diagnostic, errAnthropicFirstEventTimeout
+			}
 			if errors.Is(readErr, io.EOF) {
 				return nil, diagnostic, errEmptyResponseContent
 			}
@@ -217,32 +242,44 @@ func prepareSemanticChatStream(response *http.Response) (*http.Response, semanti
 }
 
 func callClineAnthropicStream(params map[string]any) (*http.Response, *Account, semanticStreamDiagnostic, error) {
+	return callClineAnthropicStreamWithTimeout(params, anthropicFirstEventTimeout)
+}
+
+func callClineAnthropicStreamWithTimeout(params map[string]any, firstEventTimeout time.Duration) (*http.Response, *Account, semanticStreamDiagnostic, error) {
 	response, account, err := callClineAPI(params, true)
 	if err != nil {
 		return nil, account, semanticStreamDiagnostic{}, err
 	}
-	prepared, diagnostic, prepareErr := prepareSemanticChatStream(response)
+	prepared, diagnostic, prepareErr := prepareSemanticChatStreamWithTimeout(response, firstEventTimeout)
 	if prepareErr == nil {
 		return prepared, account, diagnostic, nil
 	}
-	if !isEmptyResponseError(prepareErr) {
+	if !isEmptyResponseError(prepareErr) && !errors.Is(prepareErr, errAnthropicFirstEventTimeout) {
 		return nil, account, diagnostic, prepareErr
 	}
 
 	model, _ := params["model"].(string)
+	if errors.Is(prepareErr, errAnthropicFirstEventTimeout) {
+		setModelCooldown(account, model, time.Now().Add(anthropicSlowAccountCooldown))
+	}
 	alternative := pickAlternativeAccountForModel(model, account)
 	if alternative == nil {
 		return nil, account, diagnostic, prepareErr
 	}
-	log.Printf("  anthropic empty stream: finish=%s reasoning_chars=%d thinking_tokens=%d; retrying once with another account",
-		diagnostic.FinishReason, diagnostic.ReasoningChars, diagnostic.Usage.Reasoning)
+	log.Printf("  anthropic stream preflight failed: error=%v finish=%s reasoning_chars=%d thinking_tokens=%d; retrying once with another account",
+		prepareErr, diagnostic.FinishReason, diagnostic.ReasoningChars, diagnostic.Usage.Reasoning)
 
+	diagnostic.RetryCount = 1
 	retryResponse, retryAccount, retryErr := callClineAPIWithAccount(alternative, params, true)
 	if retryErr != nil {
 		return nil, retryAccount, diagnostic, retryErr
 	}
-	retryPrepared, retryDiagnostic, retryPrepareErr := prepareSemanticChatStream(retryResponse)
+	retryPrepared, retryDiagnostic, retryPrepareErr := prepareSemanticChatStreamWithTimeout(retryResponse, firstEventTimeout)
+	retryDiagnostic.RetryCount = 1
 	if retryPrepareErr != nil {
+		if errors.Is(retryPrepareErr, errAnthropicFirstEventTimeout) {
+			setModelCooldown(retryAccount, model, time.Now().Add(anthropicSlowAccountCooldown))
+		}
 		return nil, retryAccount, retryDiagnostic, retryPrepareErr
 	}
 	return retryPrepared, retryAccount, retryDiagnostic, nil

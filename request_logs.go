@@ -36,6 +36,9 @@ type RequestLog struct {
 	UsageAvailable  bool    `json:"usageAvailable"`
 	DurationMs      int64   `json:"durationMs"`
 	TTFTMs          int64   `json:"ttftMs"`
+	UpstreamTTFTMs  int64   `json:"upstreamTtftMs,omitempty"`
+	ThinkingTTFTMs  int64   `json:"thinkingTtftMs,omitempty"`
+	VisibleTTFTMs   int64   `json:"visibleTtftMs,omitempty"`
 	OutputTPS       float64 `json:"outputTokensPerSecond"`
 	Completed       bool    `json:"completed"`
 	Error           string  `json:"error,omitempty"`

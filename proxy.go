@@ -1220,6 +1220,9 @@ func hasFirstOutput(obj map[string]any) bool {
 		return false
 	}
 	if delta, ok := choice["delta"].(map[string]any); ok {
+		if reasoningContent(delta) != "" {
+			return true
+		}
 		if c, _ := delta["content"].(string); c != "" {
 			return true
 		}
@@ -1228,6 +1231,9 @@ func hasFirstOutput(obj map[string]any) bool {
 		}
 	}
 	if msg, ok := choice["message"].(map[string]any); ok {
+		if reasoningContent(msg) != "" {
+			return true
+		}
 		if c, _ := msg["content"].(string); c != "" {
 			return true
 		}
@@ -1969,6 +1975,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp, acc, diagnostic, err := callClineAnthropicStream(openAIReq)
+	reqLog.RetryCount = diagnostic.RetryCount
 	if err != nil {
 		if acc != nil {
 			reqLog.AccountID = acc.AccountID
@@ -2024,6 +2031,7 @@ func recordSemanticEmptyDiagnostic(reqLog *RequestLog, diagnostic semanticStream
 	reqLog.FinishReason = diagnostic.FinishReason
 	reqLog.ReasoningChars = diagnostic.ReasoningChars
 	reqLog.ThinkingTokens = diagnostic.Usage.Reasoning
+	reqLog.RetryCount = diagnostic.RetryCount
 	reqLog.RetrySuppressed = retrySuppressed
 }
 
@@ -2174,6 +2182,20 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 	var latestUsage tokenUsage
 	var latestRawUsage map[string]any
 	var firstOutputAt time.Time
+	var firstUpstreamOutputAt time.Time
+	var firstThinkingAt time.Time
+	var firstVisibleAt time.Time
+	recordLatencies := func() {
+		if !firstUpstreamOutputAt.IsZero() {
+			reqLog.UpstreamTTFTMs = firstUpstreamOutputAt.Sub(reqLog.StartedAt).Milliseconds()
+		}
+		if !firstThinkingAt.IsZero() {
+			reqLog.ThinkingTTFTMs = firstThinkingAt.Sub(reqLog.StartedAt).Milliseconds()
+		}
+		if !firstVisibleAt.IsZero() {
+			reqLog.VisibleTTFTMs = firstVisibleAt.Sub(reqLog.StartedAt).Milliseconds()
+		}
+	}
 
 	for {
 		line, err := reader.ReadString('\n')
@@ -2238,7 +2260,23 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 			delta = choice
 		}
 
-		if reasoning := reasoningContent(delta); reasoning != "" {
+		eventAt := time.Now()
+		reasoning := reasoningContent(delta)
+		content, _ := delta["content"].(string)
+		toolCalls, _ := delta["tool_calls"].([]any)
+		if reasoning != "" || content != "" || len(toolCalls) > 0 {
+			if firstUpstreamOutputAt.IsZero() {
+				firstUpstreamOutputAt = eventAt
+			}
+		}
+		if reasoning != "" && firstThinkingAt.IsZero() {
+			firstThinkingAt = eventAt
+		}
+		if (content != "" || len(toolCalls) > 0) && firstVisibleAt.IsZero() {
+			firstVisibleAt = eventAt
+		}
+
+		if reasoning != "" {
 			closeTextBlock()
 			if !thinkingOpen {
 				thinkingIndex = nextContentIndex
@@ -2344,6 +2382,7 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 	closeTextBlock()
 
 	if streamFailure != nil {
+		recordLatencies()
 		finalizeRequestLog(reqLog, latestUsage, firstOutputAt, reqLog.StartedAt, false, streamFailure.Error())
 		log.Printf("  anthropic stream failed: finish=%s text=%v tools=%d reasoning_chars=%d error=%v",
 			upstreamFinishReason, hasText, len(pendingTools), reasoningChars, streamFailure)
@@ -2364,13 +2403,14 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 	if len(toolOrder) > 0 {
 		stopReason = "tool_use"
 	}
-	if !hasText && emittedTools == 0 {
+	if reasoningChars == 0 && !hasText && emittedTools == 0 {
 		emptyErr := fmt.Errorf("%w (finish=%s reasoning_chars=%d thinking_tokens=%d)",
 			errEmptyResponseContent, upstreamFinishReason, reasoningChars, latestUsage.Reasoning)
 		emit("error", map[string]any{
 			"type":  "error",
 			"error": map[string]any{"type": "api_error", "message": emptyErr.Error()},
 		})
+		recordLatencies()
 		finalizeRequestLog(reqLog, latestUsage, firstOutputAt, reqLog.StartedAt, false, emptyErr.Error())
 		log.Printf("  anthropic stream empty: finish=%s reasoning_chars=%d thinking_tokens=%d",
 			upstreamFinishReason, reasoningChars, latestUsage.Reasoning)
@@ -2387,6 +2427,7 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 		"usage": finalUsage,
 	})
 	recordTokenUsage(acc, reqLog.Model, latestUsage)
+	recordLatencies()
 	finalizeRequestLog(reqLog, latestUsage, firstOutputAt, reqLog.StartedAt, true, "")
 
 	emit("message_stop", map[string]any{"type": "message_stop"})
