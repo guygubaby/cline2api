@@ -230,11 +230,12 @@ Files are looked up in this order: executable directory → working directory �
 | `.cline-request-logs.json` | Request logs |
 | `.cline-zen.json` | OpenCode Zen, proxy, and compaction settings |
 | `.cline-providers.json` | Custom providers, API keys, and model mappings |
+| `.cline-config.json` | Proxy rotation strategy and upstream request headers |
 | `override.md` | System Prompt override (optional) |
 
 > ⚠️ The account file contains refreshTokens and the custom-provider file contains API keys. Treat both as sensitive; never ship or commit them.
 
-Docker Compose keeps the existing state files as bind mounts and stores custom-provider configuration in an automatically created `provider-data` named volume. Before the first deployment, only the bind-mounted files need to exist:
+Docker Compose keeps the existing state files as bind mounts and stores custom-provider and proxy configuration in automatically created `provider-data` and `config-data` named volumes. Before the first deployment, only the bind-mounted files need to exist:
 
 ```bash
 touch .cline-accounts.json .cline-request-logs.json .cline-zen.json override.md

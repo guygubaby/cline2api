@@ -57,6 +57,10 @@ var apiMessages = map[string]map[locale]string{
 		localeZH: "JSON 无效",
 		localeEN: "invalid JSON",
 	},
+	"proxy_config_save_failed": {
+		localeZH: "代理配置保存失败",
+		localeEN: "Failed to save proxy configuration",
+	},
 	"refresh_token_required": {
 		localeZH: "必须提供 refreshToken",
 		localeEN: "refreshToken is required",

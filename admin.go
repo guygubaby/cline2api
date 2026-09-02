@@ -962,10 +962,17 @@ func handleAdminAccountTest(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// Global proxy config (mutable via API)
+const (
+	proxyConfigPathEnv = "CLINE_CONFIG_PATH"
+	proxyConfigFile    = ".cline-config.json"
+)
+
+// Global proxy config (mutable via API and persisted across restarts).
 var (
-	proxyConfig   = defaultProxyConfig()
-	proxyConfigMu sync.Mutex
+	proxyConfigPath   = configuredProxyConfigPath()
+	proxyConfig       = loadProxyConfigFromPath(proxyConfigPath)
+	proxyConfigMu     sync.Mutex
+	proxyConfigSaveMu sync.Mutex
 )
 
 type proxyConfigData struct {
@@ -990,24 +997,68 @@ func defaultProxyConfig() *proxyConfigData {
 	}
 }
 
-func getProxyConfig() *proxyConfigData {
-	proxyConfigMu.Lock()
-	defer proxyConfigMu.Unlock()
-	clone := &proxyConfigData{Strategy: proxyConfig.Strategy, Headers: make(map[string]string, len(proxyConfig.Headers))}
-	for key, value := range proxyConfig.Headers {
+func configuredProxyConfigPath() string {
+	if configured := strings.TrimSpace(os.Getenv(proxyConfigPathEnv)); configured != "" {
+		return configured
+	}
+	return resolveDataPath(proxyConfigFile)
+}
+
+func loadProxyConfigFromPath(path string) *proxyConfigData {
+	cfg := defaultProxyConfig()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("proxy config read failed: %v", err)
+		}
+		return cfg
+	}
+
+	var persisted proxyConfigData
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		log.Printf("proxy config parse failed: %v", err)
+		return cfg
+	}
+	if validLoadBalancingStrategy(persisted.Strategy) {
+		cfg.Strategy = persisted.Strategy
+	}
+	for key, value := range persisted.Headers {
+		cfg.Headers[key] = value
+	}
+	return cfg
+}
+
+func cloneProxyConfig(cfg *proxyConfigData) *proxyConfigData {
+	clone := &proxyConfigData{Strategy: cfg.Strategy, Headers: make(map[string]string, len(cfg.Headers))}
+	for key, value := range cfg.Headers {
 		clone.Headers[key] = value
 	}
 	return clone
 }
 
-func setProxyConfig(c *proxyConfigData) {
+func getProxyConfig() *proxyConfigData {
 	proxyConfigMu.Lock()
 	defer proxyConfigMu.Unlock()
-	clone := &proxyConfigData{Strategy: c.Strategy, Headers: make(map[string]string, len(c.Headers))}
-	for key, value := range c.Headers {
-		clone.Headers[key] = value
-	}
+	return cloneProxyConfig(proxyConfig)
+}
+
+func setProxyConfig(c *proxyConfigData) error {
+	proxyConfigSaveMu.Lock()
+	defer proxyConfigSaveMu.Unlock()
+
+	clone := cloneProxyConfig(c)
+	proxyConfigMu.Lock()
 	proxyConfig = clone
+	proxyConfigMu.Unlock()
+
+	data, err := json.MarshalIndent(clone, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode proxy config: %w", err)
+	}
+	if err := writeFileDurably(proxyConfigPath, data, 0600); err != nil {
+		return fmt.Errorf("save proxy config: %w", err)
+	}
+	return nil
 }
 
 // GET /admin/api/keys
@@ -1189,7 +1240,11 @@ func handleAdminUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if changed {
-		setProxyConfig(cfg)
+		if err := setProxyConfig(cfg); err != nil {
+			log.Printf("proxy config save failed: %v", err)
+			writeAPI(w, http.StatusInternalServerError, apiResponse{Error: tAPI(r, "proxy_config_save_failed")})
+			return
+		}
 	}
 
 	if restarting {

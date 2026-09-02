@@ -24,6 +24,9 @@ services:
       - type: volume
         source: provider-data
         target: /app/provider-data
+      - type: volume
+        source: config-data
+        target: /app/config-data
       - type: bind
         source: ./override.md
         target: /app/override.md
@@ -36,6 +39,8 @@ services:
       - CLINE_ADMIN_PASSWORD=${CLINE_ADMIN_PASSWORD:-}
       - CLINE_ALLOW_INSECURE_ADMIN=${CLINE_ALLOW_INSECURE_ADMIN:-false}
       - CLINE_PROVIDERS_PATH=/app/provider-data/.cline-providers.json
+      - CLINE_CONFIG_PATH=/app/config-data/.cline-config.json
 
 volumes:
   provider-data:
+  config-data:

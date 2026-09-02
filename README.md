@@ -236,11 +236,12 @@ git push origin v1.0.0
 | `.cline-request-logs.json` | 请求日志 |
 | `.cline-zen.json` | OpenCode Zen 配置、代理与压缩设置 |
 | `.cline-providers.json` | 第三方渠道、API Key 与模型映射 |
+| `.cline-config.json` | 代理轮询策略与上游请求头 |
 | `override.md` | System Prompt 覆盖（可选）|
 
 > ⚠️ 账号文件含 refreshToken，第三方渠道文件含 API Key，均属于敏感凭据，不要放入发布包或提交到 Git。
 
-Docker Compose 对已有状态文件使用 bind mount，并用自动创建的 `provider-data` named volume 保存第三方渠道配置。首次部署只需预先创建这些 bind mount 文件：
+Docker Compose 对已有状态文件使用 bind mount，并用自动创建的 `provider-data`、`config-data` named volume 分别保存第三方渠道配置和代理配置。首次部署只需预先创建这些 bind mount 文件：
 
 ```bash
 touch .cline-accounts.json .cline-request-logs.json .cline-zen.json override.md

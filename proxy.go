@@ -324,7 +324,9 @@ func startProxy(host string, port int) error {
 	if validLoadBalancingStrategy(p.AccountStrategy) {
 		cfg := getProxyConfig()
 		cfg.Strategy = p.AccountStrategy
-		setProxyConfig(cfg)
+		if err := setProxyConfig(cfg); err != nil {
+			log.Printf("proxy config save failed: %v", err)
+		}
 	}
 	loadRequestLogs()
 	activeCount := 0

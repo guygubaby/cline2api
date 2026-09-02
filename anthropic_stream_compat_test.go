@@ -279,6 +279,7 @@ func TestCallClineAnthropicStreamRetriesOneAlternativeAfterEmptyOutput(t *testin
 }
 
 func TestCallClineAnthropicStreamTriesThreeDistinctAccountsAndCoolsEmptyOnes(t *testing.T) {
+	isolateProxyConfigPersistence(t)
 	model := "deepseek/deepseek-v4-flash"
 	firstAccount := &Account{
 		AccountID: "empty-first", Email: "first@example.com", AccessToken: "workos:first",
