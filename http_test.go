@@ -37,6 +37,12 @@ func TestHTTPTransportUsesHTTPSProxyFromEnvironment(t *testing.T) {
 	}
 }
 
+func TestHTTPTransportAllowsLongInferenceTTFT(t *testing.T) {
+	if httpTransport.ResponseHeaderTimeout < 5*time.Minute {
+		t.Fatalf("response header timeout = %s, want at least 5m for long-context inference", httpTransport.ResponseHeaderTimeout)
+	}
+}
+
 func TestReadLimitedRequestBodyRejectsOversizedInput(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader("12345"))
 	response := httptest.NewRecorder()
@@ -73,5 +79,8 @@ func TestClineUpstreamStopsWhenDownstreamContextIsCancelled(t *testing.T) {
 	_, _, err := callClineAPIWithAccount(account, params, true)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled upstream error = %v", err)
+	}
+	if account.Status != "active" {
+		t.Fatalf("downstream cancellation changed account status to %q", account.Status)
 	}
 }

@@ -28,6 +28,9 @@ const (
 	freeModelFallback         = "deepseek/deepseek-v4-flash"
 	freeModelLastResort       = "cline-free/longcat-2.0"
 	freeModelAttemptsPerModel = 2
+	cooldownRecoveryInterval  = 30 * time.Second
+	cooldownRecoveryRetry     = 5 * time.Minute
+	accountProbeMaxTokens     = 64
 )
 
 // freeModelChain powers the virtual "free" model. Each model gets a small,
@@ -838,6 +841,10 @@ func callFreeClineAPI(params map[string]any, stream bool) (*http.Response, *Acco
 }
 
 func callClineAPIWithAccount(acc *Account, params map[string]any, stream bool) (*http.Response, *Account, error) {
+	return callClineAPIWithAccountUsingClient(httpClient, acc, params, stream)
+}
+
+func callClineAPIWithAccountUsingClient(client *http.Client, acc *Account, params map[string]any, stream bool) (*http.Response, *Account, error) {
 	token, err := ensureAccountToken(acc)
 	if err != nil {
 		return nil, acc, &clineAccountUnavailableError{err: fmt.Errorf("account %s token failed: %w", acc.Email, err)}
@@ -869,14 +876,9 @@ func callClineAPIWithAccount(acc *Account, params map[string]any, stream bool) (
 		requestID, taskID, requestHash, truncateEmail(acc.Email), stream, toolCount, getMsgCount(params),
 		body["max_tokens"], body["reasoning_effort"], body["thinking"])
 
-	resp, err := httpClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		log.Printf("  upstream audit: request=%s task=%s response_prefix_hmac_sha256=none error=transport", requestID, taskID)
-		poolMu.Lock()
-		acc.Status = "cooldown"
-		acc.CooldownUntil = time.Now().Add(5 * time.Minute)
-		poolMu.Unlock()
-		savePool()
 		return nil, acc, &clineAccountUnavailableError{err: fmt.Errorf("upstream request: %w", err)}
 	}
 
@@ -888,14 +890,9 @@ func callClineAPIWithAccount(acc *Account, params map[string]any, stream bool) (
 			token = currentAccountAccessToken(acc)
 			req.Header = clineHeaders(token, taskID)
 			req.Body = io.NopCloser(bytes.NewReader(bodyJSON))
-			resp, err = httpClient.Do(req)
+			resp, err = client.Do(req)
 			if err != nil {
 				log.Printf("  upstream audit: request=%s task=%s response_prefix_hmac_sha256=none error=retry_transport", requestID, taskID)
-				poolMu.Lock()
-				acc.Status = "cooldown"
-				acc.CooldownUntil = time.Now().Add(5 * time.Minute)
-				poolMu.Unlock()
-				savePool()
 				return nil, acc, &clineAccountUnavailableError{err: fmt.Errorf("upstream retry: %w", err)}
 			}
 			resp = wrapAuditedResponse(resp, requestID, taskID)
@@ -979,35 +976,50 @@ func parseCooldownUntil(body string) time.Time {
 // 对 CooldownUntil 已过期的账号执行探活，成功则自动激活。
 func startCooldownRecovery() {
 	go func() {
-		ticker := time.NewTicker(30 * time.Second)
+		ticker := time.NewTicker(cooldownRecoveryInterval)
 		defer ticker.Stop()
 		for range ticker.C {
-			p := loadPool()
-			poolMu.Lock()
-			var toRecover []*Account
-			for _, acc := range p.Accounts {
-				if acc.Status != "cooldown" {
-					continue
-				}
-				// 有恢复时间且已过期 → 探活
-				// 无恢复时间（旧数据）→ 也尝试探活
-				if acc.CooldownUntil.IsZero() || time.Now().After(acc.CooldownUntil) {
-					toRecover = append(toRecover, acc)
-				}
-			}
-			poolMu.Unlock()
-
-			for _, acc := range toRecover {
-				log.Printf("cooldown recovery: testing %s", acc.Email)
-				result := testAccount(acc)
-				if result.OK {
-					log.Printf("cooldown recovery: %s reactivated", acc.Email)
-				} else {
-					log.Printf("cooldown recovery: %s still unavailable: %s", acc.Email, result.Error)
-				}
-			}
+			runCooldownRecovery(time.Now(), testAccount)
 		}
 	}()
+}
+
+func runCooldownRecovery(now time.Time, probe func(*Account) accountTestResult) {
+	p := loadPool()
+	poolMu.Lock()
+	var toRecover []*Account
+	for _, acc := range p.Accounts {
+		if acc.Status != "cooldown" {
+			continue
+		}
+		// 有恢复时间且已过期 → 探活
+		// 无恢复时间（旧数据）→ 也尝试探活
+		if acc.CooldownUntil.IsZero() || now.After(acc.CooldownUntil) {
+			toRecover = append(toRecover, acc)
+		}
+	}
+	poolMu.Unlock()
+
+	for _, acc := range toRecover {
+		maskedEmail := truncateEmail(acc.Email)
+		log.Printf("cooldown recovery: testing %s", maskedEmail)
+		result := probe(acc)
+		if result.OK {
+			log.Printf("cooldown recovery: %s reactivated", maskedEmail)
+		} else {
+			poolMu.Lock()
+			if acc.Status == "cooldown" {
+				acc.CooldownUntil = now.Add(cooldownRecoveryRetry)
+			}
+			poolMu.Unlock()
+			errorMessage := result.Error
+			if acc.Email != "" {
+				errorMessage = strings.ReplaceAll(errorMessage, acc.Email, maskedEmail)
+			}
+			log.Printf("cooldown recovery: %s still unavailable; retry after %s: %s", maskedEmail, cooldownRecoveryRetry, errorMessage)
+			savePool()
+		}
+	}
 }
 
 // testAccount sends a minimal "hi" request through a specific account to verify
@@ -1019,14 +1031,14 @@ func testAccount(acc *Account) accountTestResult {
 
 	params := map[string]any{
 		"model":      getDefaultModel(),
-		"max_tokens": 16,
+		"max_tokens": accountProbeMaxTokens,
 		"stream":     false,
 		"messages": []any{
 			map[string]any{"role": "user", "content": "hi"},
 		},
 	}
 
-	resp, _, err := callClineAPIWithAccount(acc, params, false)
+	resp, _, err := callClineAPIWithAccountUsingClient(accountProbeHTTPClient, acc, params, false)
 	if err != nil {
 		result.DurationMs = time.Since(started).Milliseconds()
 		result.Error = truncate(err.Error(), 200)
@@ -1066,6 +1078,7 @@ func testAccount(acc *Account) accountTestResult {
 	wasInactive := acc.Status != "active"
 	if wasInactive {
 		acc.Status = "active"
+		acc.CooldownUntil = time.Time{}
 	}
 	poolMu.Unlock()
 	if wasInactive {

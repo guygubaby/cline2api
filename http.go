@@ -14,7 +14,11 @@ import (
 	"time"
 )
 
-const maxProxyRequestBodyBytes int64 = 64 << 20
+const (
+	maxProxyRequestBodyBytes       int64 = 64 << 20
+	inferenceResponseHeaderTimeout       = 5 * time.Minute
+	accountProbeTimeout                  = 20 * time.Second
+)
 
 var errRequestBodyTooLarge = errors.New("request body too large")
 
@@ -28,7 +32,7 @@ var httpTransport = &http.Transport{
 	DisableCompression:    false,
 	DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
 	TLSHandshakeTimeout:   10 * time.Second,
-	ResponseHeaderTimeout: 30 * time.Second,
+	ResponseHeaderTimeout: inferenceResponseHeaderTimeout,
 	ExpectContinueTimeout: time.Second,
 }
 
@@ -57,6 +61,11 @@ func requestBodyErrorStatus(err error) int {
 
 var httpClient = &http.Client{
 	Transport: httpTransport,
+}
+
+var accountProbeHTTPClient = &http.Client{
+	Transport: httpTransport,
+	Timeout:   accountProbeTimeout,
 }
 
 func httpPostForm(rawURL string, form url.Values) (*http.Response, error) {
