@@ -103,32 +103,13 @@ th{color:var(--text2);font-weight:600;font-size:11px;text-transform:uppercase;le
 tbody tr:last-child td{border-bottom:none}
 tbody tr{transition:background 0.15s var(--ease)}
 tbody tr:hover{background:var(--surface2)}
-.account-table{min-width:1040px}
-.account-table>thead>tr>th:first-child,.account-table>tbody>.account-summary-row>td:first-child{width:16%}
-.account-table>thead>tr>th:nth-child(2),.account-table>tbody>.account-summary-row>td:nth-child(2){width:8%}
-.account-table>thead>tr>th:nth-child(3),.account-table>tbody>.account-summary-row>td:nth-child(3){width:5%}
-.account-table>thead>tr>th:nth-child(4),.account-table>tbody>.account-summary-row>td:nth-child(4),.account-table>thead>tr>th:nth-child(5),.account-table>tbody>.account-summary-row>td:nth-child(5),.account-table>thead>tr>th:nth-child(6),.account-table>tbody>.account-summary-row>td:nth-child(6),.account-table>thead>tr>th:nth-child(7),.account-table>tbody>.account-summary-row>td:nth-child(7){width:7%;text-align:right;font-variant-numeric:tabular-nums}
-.account-table>thead>tr>th:nth-child(8),.account-table>tbody>.account-summary-row>td:nth-child(8),.account-table>thead>tr>th:nth-child(9),.account-table>tbody>.account-summary-row>td:nth-child(9){width:11%;white-space:nowrap;color:var(--text2)}
-.account-table>thead>tr>th:last-child,.account-table>tbody>.account-summary-row>td:last-child{width:156px;min-width:156px;text-align:right;white-space:nowrap}
-.account-actions{display:flex;align-items:center;justify-content:flex-end;gap:4px}
-.account-actions .btn{width:32px;padding-left:0;padding-right:0;justify-content:center;flex:0 0 auto}
-.account-model-row>td{padding:0;border-bottom-color:var(--border)}
-.model-detail{padding:12px 20px 16px;background:var(--surface2)}
-.model-detail-heading{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:0 4px 10px;color:var(--text2);font-size:12px;font-weight:600}
-.model-detail-summary{font-weight:500;color:var(--text3)}
-.model-subtable-scroll{overflow-x:auto;overscroll-behavior-inline:contain;border:1px solid var(--border2);border-radius:var(--radius-sm);background:var(--surface)}
-.model-subtable{min-width:820px;table-layout:fixed}
-.model-subtable th,.model-subtable td{padding:9px 12px}
-.model-subtable th{background:var(--surface);font-size:10px}
-.model-subtable th:nth-child(n+3),.model-subtable td:nth-child(n+3){text-align:right;font-variant-numeric:tabular-nums}
-.model-subtable tbody tr{background:var(--surface)}
-.model-subtable tbody tr:hover{background:var(--surface2)}
-.model-cell{min-width:0}
-.model-identity{display:flex;align-items:center;gap:7px;min-width:0}
-.model-id{min-width:0;overflow-wrap:anywhere;color:var(--text)}
-.model-subtable .model-tag{flex:0 0 auto;margin:0;padding:1px 6px;border-radius:7px;font-size:10px}
-.model-latency{display:block;margin-top:2px;color:var(--text3);font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Segoe UI',sans-serif;font-size:11px;white-space:nowrap}
-.model-empty{padding:18px!important;text-align:center!important;color:var(--text3)}
+.account-table th:first-child,.account-table td:first-child{width:16%}
+.account-table th:nth-child(2),.account-table td:nth-child(2){width:8%}
+.account-table th:nth-child(3),.account-table td:nth-child(3){width:5%}
+.account-table th:nth-child(4),.account-table td:nth-child(4),.account-table th:nth-child(5),.account-table td:nth-child(5),.account-table th:nth-child(6),.account-table td:nth-child(6),.account-table th:nth-child(7),.account-table td:nth-child(7){width:7%;text-align:right;font-variant-numeric:tabular-nums}
+.account-table th:nth-child(8),.account-table td:nth-child(8),.account-table th:nth-child(9),.account-table td:nth-child(9){width:11%;white-space:nowrap;color:var(--text2)}
+.account-table th:last-child,.account-table td:last-child{width:120px;min-width:120px;text-align:right;white-space:nowrap}
+.account-table td:last-child .btn{width:32px;padding-left:0;padding-right:0;justify-content:center}
 .account-email{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);font-weight:500}
 .account-cards{display:none}
 .log-cards{display:none}
@@ -308,7 +289,7 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
 	  .main{padding:30px 32px 56px}
 	  .cards{grid-template-columns:repeat(2,minmax(0,1fr))}
 	  .cards.tokens{grid-template-columns:repeat(3,minmax(0,1fr))}
-	  .account-table>thead>tr>th:nth-child(9),.account-table>tbody>.account-summary-row>td:nth-child(9){display:none}
+	  .account-table th:nth-child(9),.account-table td:nth-child(9){display:none}
 	}
 	@media (max-width:760px){
 	  .log-table{display:none}
@@ -1658,8 +1639,8 @@ async function loadAccounts() {
       return;
     }
     const sn = { active: t('活跃'), cooldown: t('冷却'), expired: t('已过期') };
-    // 模型统计面板（仅 free 模型 + 模型级冷却状态）
-    const modelStatsPanel = a => {
+    // 模型统计子行（仅 free 模型 + 模型级冷却状态）
+    const modelStatsRow = a => {
       const stats = Object.values(a.modelStats || {}).sort((x, y) => y.totalTokens - x.totalTokens);
       const cools = a.modelCooldowns || {};
       const latencies = a.modelLatencies || {};
@@ -1668,38 +1649,37 @@ async function loadAccounts() {
         const cdBadge = cd
           ? '<span class="status cooldown status-cooldown" title="' + t('模型冷却中') + ' · ' + formatCooldown(cd) + '"><span class="cd-icon">⏳</span><span class="cd-time">' + formatCooldown(cd) + '</span></span>'
           : '';
-        return '<tr>' +
-          '<td class="model-cell"><div class="model-identity"><span class="model-id mono">' + esc(st.modelId) + '</span><span class="model-tag free">free</span></div>' +
-            (latencies[st.modelId] ? '<span class="model-latency">' + t('TTFT EWMA') + ' ' + formatDuration(latencies[st.modelId].ewmaMs) + '</span>' : '') + '</td>' +
+        return '<tr style="background:var(--surface2)">' +
+          '<td style="padding-left:32px" class="mono">' + esc(st.modelId) + ' <span class="model-tag free" style="font-size:10px;padding:1px 6px">free</span>' +
+            (latencies[st.modelId] ? ' · ' + t('TTFT EWMA') + ' ' + formatDuration(latencies[st.modelId].ewmaMs) : '') + '</td>' +
           '<td>' + cdBadge + '</td>' +
           '<td>' + formatNumber(st.usageCount) + '</td>' +
           '<td>' + formatTokenCount(st.promptTokens) + '</td>' +
           '<td>' + formatTokenCount(st.completionTokens) + '</td>' +
           '<td>' + formatTokenCount(st.totalTokens) + '</td>' +
           '<td>' + formatTokenCount(st.cachedTokens) + '</td>' +
+          '<td></td><td></td><td></td>' +
           '</tr>';
       }).join('');
       const modelsWithoutStats = Array.from(new Set(Object.keys(cools).concat(Object.keys(latencies))))
         .filter(modelId => !(a.modelStats || {})[modelId]);
       const extraCools = modelsWithoutStats.map(m =>
-        '<tr>' +
-          '<td class="model-cell"><span class="model-id mono">' + esc(m) + '</span>' +
-            (latencies[m] ? '<span class="model-latency">' + t('TTFT EWMA') + ' ' + formatDuration(latencies[m].ewmaMs) + '</span>' : '') + '</td>' +
+        '<tr style="background:var(--surface2)">' +
+          '<td style="padding-left:32px" class="mono">' + esc(m) +
+            (latencies[m] ? ' · ' + t('TTFT EWMA') + ' ' + formatDuration(latencies[m].ewmaMs) : '') + '</td>' +
           '<td>' + (cools[m] ? '<span class="status cooldown status-cooldown" title="' + t('模型冷却中') + ' · ' + formatCooldown(cools[m]) + '"><span class="cd-icon">⏳</span><span class="cd-time">' + formatCooldown(cools[m]) + '</span></span>' : '') + '</td>' +
-          '<td colspan="5"></td>' +
+          '<td colspan="8"></td>' +
         '</tr>'
       ).join('');
       const totalCooling = Object.keys(cools).length;
-      const summary = totalCooling ? '<span class="model-detail-summary" style="color:var(--yellow)">⏳ ' + totalCooling + ' ' + t('模型冷却中') + '</span>' : '';
-      const body = rows || extraCools
-        ? rows + extraCools
-        : '<tr><td colspan="7" class="model-empty">' + t('暂无数据') + '</td></tr>';
-      return '<div class="model-detail">' +
-        '<div class="model-detail-heading"><span>' + t('按模型统计（免费用量 + 首字延迟）') + '</span>' + summary + '</div>' +
-        '<div class="model-subtable-scroll"><table class="model-subtable">' +
-          '<colgroup><col style="width:34%"><col style="width:12%"><col style="width:9%"><col style="width:11%"><col style="width:11%"><col style="width:11%"><col style="width:12%"></colgroup>' +
-          '<thead><tr><th>' + t('模型') + '</th><th>' + t('状态') + '</th><th>' + t('请求') + '</th><th>' + t('输入') + '</th><th>' + t('输出') + '</th><th>' + t('总 Token') + '</th><th>' + t('缓存') + '</th></tr></thead>' +
-          '<tbody>' + body + '</tbody></table></div></div>';
+      const title = '<tr style="background:var(--surface2)">' +
+        '<td colspan="10" style="padding:8px 32px;color:var(--text2);font-size:12px;font-weight:600">' +
+          t('按模型统计（免费用量 + 首字延迟）') + (totalCooling ? ' · <span style="color:var(--yellow)">⏳ ' + totalCooling + ' ' + t('模型冷却中') + '</span>' : '') +
+        '</td></tr>';
+      if (!rows && !extraCools) {
+        return title + '<tr style="background:var(--surface2)"><td colspan="10" style="padding:6px 32px;color:var(--text3);font-size:12px">' + t('暂无数据') + '</td></tr>';
+      }
+      return title + rows + extraCools;
     };
     tbody.innerHTML = list.map(a => {
       const lu = a.lastUsed ? new Date(a.lastUsed).toLocaleString(LC()) : '-';
@@ -1709,7 +1689,7 @@ async function loadAccounts() {
         : '<span class="status ' + a.status + '"><span class="status-dot ' + a.status + '"></span>' + (sn[a.status] || a.status) + '</span>';
       // 始终显示模型统计展开按钮（无数据时子行提示暂无）
       const expander = '<button class="btn btn-sm btn-icon" onclick="toggleModelRow(\'' + a.accountId + '\', this)" title="' + t('展开') + '" aria-label="' + t('展开') + '">▸</button>';
-      return '<tr class="account-summary-row">' +
+      return '<tr>' +
         '<td>' + esc(a.email) + '</td>' +
         '<td>' + statusBadge + '</td>' +
         '<td>' + formatNumber(a.usageCount) + '</td>' +
@@ -1719,12 +1699,13 @@ async function loadAccounts() {
         '<td>' + formatTokenCount(a.cachedTokens) + '</td>' +
         '<td class="mono" style="font-size:11px">' + lu + '</td>' +
         '<td class="mono" style="font-size:11px">' + cr + '</td>' +
-        '<td><span class="account-actions">' + expander +
-          '<button class="btn btn-sm" onclick="testAccount(\'' + a.accountId + '\',this)" title="测试" aria-label="测试">⚡</button>' +
-          '<button class="btn btn-sm" onclick="resetAccount(\'' + a.accountId + '\')" title="重置" aria-label="重置">↻</button>' +
+        '<td style="white-space:nowrap">' + expander +
+          '<button class="btn btn-sm" onclick="testAccount(\'' + a.accountId + '\',this)" title="测试" aria-label="测试">⚡</button> ' +
+          '<button class="btn btn-sm" onclick="resetAccount(\'' + a.accountId + '\')" title="重置" aria-label="重置">↻</button> ' +
           '<button class="btn btn-sm btn-danger" onclick="deleteAccount(\'' + a.accountId + '\')" title="删除" aria-label="删除">✕</button>' +
-        '</span></td></tr>' +
-        '<tr class="account-model-row" id="modelRow-' + a.accountId + '" style="display:none"><td colspan="10">' + modelStatsPanel(a) + '</td></tr>';
+        '</td></tr>' +
+        '<tr id="modelRow-' + a.accountId + '" style="display:none"><td colspan="10" style="padding:0">' +
+          '<table class="model-subtable" style="width:100%">' + modelStatsRow(a) + '</table></td></tr>';
     }).join('');
     cards.innerHTML = list.map(a => {
       const lu = a.lastUsed ? new Date(a.lastUsed).toLocaleString(LC()) : t('从未使用');
