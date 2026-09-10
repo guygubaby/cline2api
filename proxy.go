@@ -31,6 +31,7 @@ const (
 	cooldownRecoveryInterval  = 30 * time.Second
 	cooldownRecoveryRetry     = 5 * time.Minute
 	accountProbeMaxTokens     = 64
+	openAIStreamHeartbeat     = 15 * time.Second
 )
 
 // freeModelChain powers the virtual "free" model. Each model gets a small,
@@ -589,7 +590,10 @@ func startProxy(host string, port int) error {
 		}
 		defer resp.Body.Close()
 
-		handleStreamResponse(w, resp, acc, &reqLog, includeUsage)
+		handleStreamResponseWithRetryAndHeartbeat(w, resp, acc, &reqLog, includeUsage, openAIStreamHeartbeat,
+			func(excluded *Account) (*http.Response, *Account, error) {
+				return retryClineChatStream(params, excluded, upstreamFirstEventTimeout)
+			})
 	})
 	mux.HandleFunc("/v1/chat/completions", chatHandler)
 	mux.HandleFunc("/chat/completions", chatHandler)
@@ -1393,12 +1397,33 @@ func shouldForwardStandardChatChunk(obj map[string]any) bool {
 	return false
 }
 
+type upstreamSSELine struct {
+	line string
+	err  error
+}
+
+type chatStreamRetryFunc func(excluded *Account) (*http.Response, *Account, error)
+
 func handleStreamResponse(w http.ResponseWriter, upstream *http.Response, acc *Account, reqLog *RequestLog, includeUsage bool) {
+	handleStreamResponseWithRetryAndHeartbeat(w, upstream, acc, reqLog, includeUsage, openAIStreamHeartbeat, nil)
+}
+
+func handleStreamResponseWithHeartbeat(w http.ResponseWriter, upstream *http.Response, acc *Account, reqLog *RequestLog, includeUsage bool, heartbeatInterval time.Duration) {
+	handleStreamResponseWithRetryAndHeartbeat(w, upstream, acc, reqLog, includeUsage, heartbeatInterval, nil)
+}
+
+func handleStreamResponseWithRetryAndHeartbeat(w http.ResponseWriter, upstream *http.Response, acc *Account, reqLog *RequestLog, includeUsage bool, heartbeatInterval time.Duration, retry chatStreamRetryFunc) {
+	handleStreamResponseAttempt(w, upstream, acc, reqLog, includeUsage, heartbeatInterval, retry, true)
+}
+
+func handleStreamResponseAttempt(w http.ResponseWriter, upstream *http.Response, acc *Account, reqLog *RequestLog, includeUsage bool, heartbeatInterval time.Duration, retry chatStreamRetryFunc, writeHeaders bool) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.WriteHeader(http.StatusOK)
+	if writeHeaders {
+		w.WriteHeader(http.StatusOK)
+	}
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -1407,6 +1432,43 @@ func handleStreamResponse(w http.ResponseWriter, upstream *http.Response, acc *A
 	}
 
 	reader := bufio.NewReader(upstream.Body)
+	lines := make(chan upstreamSSELine, 1)
+	readerDone := make(chan struct{})
+	defer close(readerDone)
+	go func() {
+		defer close(lines)
+		for {
+			line, err := reader.ReadString('\n')
+			select {
+			case lines <- upstreamSSELine{line: line, err: err}:
+			case <-readerDone:
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	var heartbeat <-chan time.Time
+	var heartbeatTimer *time.Timer
+	if heartbeatInterval > 0 {
+		heartbeatTimer = time.NewTimer(heartbeatInterval)
+		heartbeat = heartbeatTimer.C
+		defer heartbeatTimer.Stop()
+	}
+	resetHeartbeat := func() {
+		if heartbeatTimer == nil {
+			return
+		}
+		if !heartbeatTimer.Stop() {
+			select {
+			case <-heartbeatTimer.C:
+			default:
+			}
+		}
+		heartbeatTimer.Reset(heartbeatInterval)
+	}
 	var latestUsage tokenUsage
 	var latestUsagePayload map[string]any
 	var firstOutputAt time.Time
@@ -1420,14 +1482,32 @@ func handleStreamResponse(w http.ResponseWriter, upstream *http.Response, acc *A
 	var streamFailure error
 	var visibleRepetition outputRepetitionGuard
 	var reasoningRepetition outputRepetitionGuard
+streamLoop:
 	for {
-		line, readErr := reader.ReadString('\n')
+		var line string
+		var readErr error
+		select {
+		case result, ok := <-lines:
+			if !ok {
+				break streamLoop
+			}
+			line, readErr = result.line, result.err
+		case <-heartbeat:
+			if _, err := w.Write([]byte(":\n\n")); err != nil {
+				streamFailure = fmt.Errorf("write downstream SSE heartbeat: %w", err)
+				break streamLoop
+			}
+			flusher.Flush()
+			resetHeartbeat()
+			continue
+		}
 		if line != "" {
 			line = strings.TrimRight(line, "\r\n")
 			if strings.HasPrefix(line, "data:") {
 				payload := strings.TrimSpace(line[5:])
 				if payload == "[DONE]" {
 					sawDone = true
+					break streamLoop
 				} else if payload != "" {
 					var obj map[string]any
 					if err := json.Unmarshal([]byte(payload), &obj); err != nil {
@@ -1507,19 +1587,41 @@ func handleStreamResponse(w http.ResponseWriter, upstream *http.Response, acc *A
 						}
 						w.Write([]byte("data: " + string(normalizedBytes) + "\n\n"))
 						flusher.Flush()
+						resetHeartbeat()
 					}
 				}
 			}
 		}
 		if readErr != nil {
 			if !errors.Is(readErr, io.EOF) {
-				streamFailure = fmt.Errorf("read upstream SSE: %w", readErr)
+				streamFailure = fmt.Errorf("%w: %w", errUpstreamStreamRead, readErr)
 			}
-			break
+			break streamLoop
 		}
 	}
 	if streamFailure == nil && !sawDone && finishReason == "" {
 		streamFailure = errStreamEarlyEOF
+	}
+	if !hasOutput && !sawDone && finishReason == "" && retry != nil && (errors.Is(streamFailure, errStreamEarlyEOF) || errors.Is(streamFailure, errUpstreamStreamRead)) {
+		_ = upstream.Body.Close()
+		retryResponse, retryAccount, retryErr := retry(acc)
+		if retryAccount != nil || retryResponse != nil {
+			reqLog.RetryCount++
+		}
+		if retryAccount != nil {
+			reqLog.AccountID = retryAccount.AccountID
+			reqLog.AccountEmail = retryAccount.Email
+		}
+		if retryResponse != nil && retryErr == nil {
+			defer retryResponse.Body.Close()
+			log.Printf("  chat stream truncated before visible output (%v); retrying once with another account", streamFailure)
+			handleStreamResponseAttempt(w, retryResponse, retryAccount, reqLog, includeUsage, heartbeatInterval, nil, false)
+			return
+		}
+		if retryErr != nil {
+			log.Printf("  chat stream retry after truncation failed: %v", retryErr)
+			streamFailure = retryErr
+		}
 	}
 	if streamFailure == nil && !hasOutput {
 		streamFailure = errEmptyResponseContent

@@ -293,7 +293,7 @@ func prepareSemanticChatStreamWithTimeout(response *http.Response, timeout time.
 			if errors.Is(readErr, io.EOF) {
 				return nil, diagnostic, errEmptyResponseContent
 			}
-			return nil, diagnostic, fmt.Errorf("read upstream SSE: %w", readErr)
+			return nil, diagnostic, fmt.Errorf("%w: %w", errUpstreamStreamRead, readErr)
 		}
 	}
 }

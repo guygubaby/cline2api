@@ -10,9 +10,10 @@ import (
 )
 
 var (
-	errStreamEarlyEOF   = errors.New("upstream stream ended before a terminal event")
-	errRepetitiveOutput = errors.New("upstream generated a repetitive output loop; stream terminated")
-	errPromptEcho       = errors.New("upstream echoed protected system instructions; stream terminated")
+	errStreamEarlyEOF     = errors.New("upstream stream ended before a terminal event")
+	errUpstreamStreamRead = errors.New("read upstream SSE")
+	errRepetitiveOutput   = errors.New("upstream generated a repetitive output loop; stream terminated")
+	errPromptEcho         = errors.New("upstream echoed protected system instructions; stream terminated")
 )
 
 var embeddedHTTPStatusPattern = regexp.MustCompile(`(?i)status\s+([45][0-9]{2})`)
@@ -115,7 +116,7 @@ func retryableStreamInitializationError(err error) bool {
 	if errors.Is(err, errUpstreamFirstEventTimeout) {
 		return false
 	}
-	if errors.Is(err, errStreamEarlyEOF) || isEmptyResponseError(err) {
+	if errors.Is(err, errStreamEarlyEOF) || errors.Is(err, errUpstreamStreamRead) || isEmptyResponseError(err) {
 		return true
 	}
 	status := upstreamErrorStatus(err)
@@ -133,6 +134,8 @@ func responsesUpstreamErrorDetails(err error) (int, string, string) {
 		return 504, "api_error", "upstream_timeout"
 	case errors.Is(err, errStreamEarlyEOF):
 		return 502, "api_error", "stream_early_eof"
+	case errors.Is(err, errUpstreamStreamRead):
+		return 502, "api_error", "stream_truncated"
 	case errors.Is(err, errRepetitiveOutput):
 		return 502, "api_error", repetitiveOutputErrorCode
 	case errors.Is(err, errPromptEcho):

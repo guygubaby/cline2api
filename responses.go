@@ -750,6 +750,26 @@ func callClineChatStreamWithTimeout(params map[string]any, timeout time.Duration
 	return callClinePreparedStreamWithTimeout(params, timeout, "chat")
 }
 
+func retryClineChatStream(params map[string]any, excluded *Account, timeout time.Duration) (*http.Response, *Account, error) {
+	model, _ := params["model"].(string)
+	alternative := pickAlternativeAccountForModel(model, excluded)
+	if alternative == nil {
+		return nil, nil, nil
+	}
+
+	attemptStarted := time.Now()
+	response, account, err := callClineAPIWithAccount(alternative, params, true)
+	if err == nil {
+		response, err = prepareUpstreamChatStreamWithTimeout(response, timeout)
+	}
+	if err == nil {
+		elapsed := time.Since(attemptStarted)
+		recordSuccessfulAccountAttempt(params, account, model, elapsed, elapsed)
+	}
+	coolAccountAfterStreamInitializationError(account, model, err)
+	return response, account, err
+}
+
 type responsesSSEWriter struct {
 	w        http.ResponseWriter
 	flusher  http.Flusher

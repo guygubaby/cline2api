@@ -323,6 +323,108 @@ func TestHandleChatStreamMarksEarlyEOFFailed(t *testing.T) {
 	}
 }
 
+func TestHandleChatStreamSendsCommentHeartbeatWhileUpstreamIsQuiet(t *testing.T) {
+	reader, writer := io.Pipe()
+	upstream := &http.Response{Body: reader}
+	recorder := httptest.NewRecorder()
+	reqLog := &RequestLog{StartedAt: time.Now(), Protocol: "openai", Model: "m1", Stream: true}
+
+	go func() {
+		time.Sleep(25 * time.Millisecond)
+		_, _ = io.WriteString(writer, strings.Join([]string{
+			`data: {"model":"m1","choices":[{"delta":{"content":"done"}}]}`,
+			`data: {"model":"m1","choices":[{"delta":{},"finish_reason":"stop"}]}`,
+			`data: [DONE]`,
+			``,
+		}, "\n"))
+		_ = writer.Close()
+	}()
+
+	handleStreamResponseWithHeartbeat(recorder, upstream, nil, reqLog, false, 5*time.Millisecond)
+
+	if !reqLog.Completed {
+		t.Fatalf("heartbeat stream request log = %#v", reqLog)
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, ":\n\n") {
+		t.Fatalf("stream did not include an SSE comment heartbeat: %q", body)
+	}
+	if strings.Contains(body, "ping") {
+		t.Fatalf("heartbeat must not contain visible text: %q", body)
+	}
+	if !strings.Contains(body, `"content":"done"`) || !strings.Contains(body, "data: [DONE]") {
+		t.Fatalf("heartbeat disrupted the Chat Completions stream: %q", body)
+	}
+}
+
+type unexpectedEOFReader struct{}
+
+func (unexpectedEOFReader) Read([]byte) (int, error) {
+	return 0, io.ErrUnexpectedEOF
+}
+
+func TestHandleChatStreamRetriesTruncationBeforeVisibleOutput(t *testing.T) {
+	firstAccount := &Account{AccountID: "first", Email: "first@example.com"}
+	secondAccount := &Account{AccountID: "second", Email: "second@example.com"}
+	first := &http.Response{Body: io.NopCloser(io.MultiReader(
+		strings.NewReader("data: {\"model\":\"m1\",\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking\"}}]}\n\n"),
+		unexpectedEOFReader{},
+	))}
+	second := &http.Response{Body: io.NopCloser(strings.NewReader(strings.Join([]string{
+		`data: {"model":"m1","choices":[{"delta":{"content":"recovered"}}]}`,
+		`data: {"model":"m1","choices":[{"delta":{},"finish_reason":"stop"}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")))}
+	recorder := httptest.NewRecorder()
+	reqLog := &RequestLog{StartedAt: time.Now(), Protocol: "openai", Model: "m1", Stream: true, AccountID: firstAccount.AccountID}
+	retryCalls := 0
+
+	handleStreamResponseWithRetryAndHeartbeat(recorder, first, firstAccount, reqLog, false, 0,
+		func(excluded *Account) (*http.Response, *Account, error) {
+			retryCalls++
+			if excluded != firstAccount {
+				t.Fatalf("excluded account = %#v", excluded)
+			}
+			return second, secondAccount, nil
+		})
+
+	body := recorder.Body.String()
+	if retryCalls != 1 || reqLog.RetryCount != 1 || !reqLog.Completed {
+		t.Fatalf("safe retry result: calls=%d log=%#v", retryCalls, reqLog)
+	}
+	if reqLog.AccountID != secondAccount.AccountID || reqLog.AccountEmail != secondAccount.Email {
+		t.Fatalf("request log did not switch accounts: %#v", reqLog)
+	}
+	if !strings.Contains(body, `"content":"recovered"`) || strings.Contains(body, `"error"`) || strings.Contains(body, "reasoning_content") {
+		t.Fatalf("safe retry stream = %q", body)
+	}
+}
+
+func TestHandleChatStreamDoesNotRetryTruncationAfterVisibleOutput(t *testing.T) {
+	first := &http.Response{Body: io.NopCloser(io.MultiReader(
+		strings.NewReader("data: {\"model\":\"m1\",\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n"),
+		unexpectedEOFReader{},
+	))}
+	recorder := httptest.NewRecorder()
+	reqLog := &RequestLog{StartedAt: time.Now(), Protocol: "openai", Model: "m1", Stream: true}
+	retryCalls := 0
+
+	handleStreamResponseWithRetryAndHeartbeat(recorder, first, nil, reqLog, false, 0,
+		func(*Account) (*http.Response, *Account, error) {
+			retryCalls++
+			return nil, nil, errors.New("must not retry")
+		})
+
+	body := recorder.Body.String()
+	if retryCalls != 0 || reqLog.Completed || reqLog.ErrorCode != "stream_truncated" {
+		t.Fatalf("unsafe retry result: calls=%d log=%#v", retryCalls, reqLog)
+	}
+	if !strings.Contains(body, `"content":"partial"`) || !strings.Contains(body, `"code":"stream_truncated"`) {
+		t.Fatalf("truncated stream = %q", body)
+	}
+}
+
 func TestHandleChatStreamRecordsTerminalReason(t *testing.T) {
 	upstreamBody := strings.Join([]string{
 		`data: {"model":"m1","choices":[{"delta":{"content":"done"}}]}`,
