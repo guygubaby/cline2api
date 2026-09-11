@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -29,6 +30,65 @@ const (
 	semanticEmptyAccountCooldown   = time.Minute
 	anthropicSemanticMaxAttempts   = 3
 )
+
+const clientCancelledErrorCode = "client_cancelled"
+
+var anthropicStreamHeartbeatInterval = 15 * time.Second
+
+type anthropicStreamPreparation struct {
+	response   *http.Response
+	account    *Account
+	diagnostic semanticStreamDiagnostic
+	err        error
+}
+
+func setAnthropicStreamHeaders(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+}
+
+func waitForAnthropicStreamPreparation(w http.ResponseWriter, heartbeatInterval time.Duration, prepare func() anthropicStreamPreparation) (anthropicStreamPreparation, bool) {
+	flusher, supportsStreaming := w.(http.Flusher)
+	if heartbeatInterval <= 0 || !supportsStreaming {
+		return prepare(), false
+	}
+
+	resultCh := make(chan anthropicStreamPreparation, 1)
+	go func() {
+		resultCh <- prepare()
+	}()
+
+	ticker := time.NewTicker(heartbeatInterval)
+	defer ticker.Stop()
+	headersCommitted := false
+	for {
+		select {
+		case result := <-resultCh:
+			return result, headersCommitted
+		case <-ticker.C:
+			if !headersCommitted {
+				setAnthropicStreamHeaders(w)
+				w.WriteHeader(http.StatusOK)
+				headersCommitted = true
+			}
+			if _, err := io.WriteString(w, ":\n\n"); err != nil {
+				return anthropicStreamPreparation{err: fmt.Errorf("write downstream SSE heartbeat: %w", err)}, headersCommitted
+			}
+			flusher.Flush()
+		}
+	}
+}
+
+func recordAnthropicClientCancellation(reqLog *RequestLog, usage tokenUsage, err error) bool {
+	if !errors.Is(err, context.Canceled) {
+		return false
+	}
+	reqLog.ErrorCode = clientCancelledErrorCode
+	finalizeRequestLog(reqLog, usage, time.Time{}, reqLog.StartedAt, false, "client canceled request")
+	return true
+}
 
 type semanticEmptyResponseDetails struct {
 	Status    int

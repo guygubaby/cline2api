@@ -2401,7 +2401,9 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	reqLog := newRequestLog("anthropic", req.Model, req.Stream)
 	openAIReq := anthropicToOpenAI(req)
 	attachRequestIsolation(openAIReq, reqLog.ID, requestTenantScope(r))
-	attachProxyRequestContext(openAIReq, r.Context())
+	upstreamContext, cancelUpstream := context.WithCancel(r.Context())
+	defer cancelUpstream()
+	attachProxyRequestContext(openAIReq, upstreamContext)
 	configurePromptEchoGuard(&reqLog, openAIReq)
 	setRequestLogIsolationMetadata(&reqLog, openAIReq)
 	estimatedInputTokens := estimateRawRequestTokens(body)
@@ -2526,7 +2528,13 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, acc, diagnostic, err := callClineAnthropicStream(openAIReq)
+	preparation, streamHeadersCommitted := waitForAnthropicStreamPreparation(w, anthropicStreamHeartbeatInterval, func() anthropicStreamPreparation {
+		response, account, diagnostic, prepareErr := callClineAnthropicStream(openAIReq)
+		return anthropicStreamPreparation{
+			response: response, account: account, diagnostic: diagnostic, err: prepareErr,
+		}
+	})
+	resp, acc, diagnostic, err := preparation.response, preparation.account, preparation.diagnostic, preparation.err
 	setRequestLogEffectiveModel(&reqLog, openAIReq)
 	reqLog.RetryCount = diagnostic.RetryCount
 	setRequestLogIsolationMetadata(&reqLog, openAIReq)
@@ -2535,12 +2543,24 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 			reqLog.AccountID = acc.AccountID
 			reqLog.AccountEmail = acc.Email
 		}
+		if recordAnthropicClientCancellation(&reqLog, diagnostic.Usage, err) {
+			log.Printf("  anthropic client canceled request")
+			return
+		}
 		log.Printf("  anthropic api error: %v", err)
-		log.Printf("  anthropic stream rejected: finish=%s reasoning_chars=%d thinking_tokens=%d",
+		log.Printf("  anthropic stream preparation failed: finish=%s reasoning_chars=%d thinking_tokens=%d",
 			diagnostic.FinishReason, diagnostic.ReasoningChars, diagnostic.Usage.Reasoning)
 		if isEmptyResponseError(err) {
 			rememberSemanticEmptyCircuit(requestFingerprint, diagnostic, time.Now())
+			if streamHeadersCommitted {
+				writeAnthropicSemanticEmptyStreamError(w, &reqLog, diagnostic, false, estimatedInputTokens)
+				return
+			}
 			writeAnthropicSemanticEmpty(w, &reqLog, diagnostic, false, estimatedInputTokens)
+			return
+		}
+		if streamHeadersCommitted {
+			writeAnthropicPreparedStreamError(w, &reqLog, diagnostic.Usage, err)
 			return
 		}
 		writeAnthropicUpstreamError(w, &reqLog, diagnostic.Usage, err)
@@ -2552,7 +2572,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		reqLog.AccountEmail = acc.Email
 	}
 
-	handleAnthropicStream(w, resp, acc, &reqLog, estimatedInputTokens)
+	handleAnthropicStreamPrepared(w, resp, acc, &reqLog, estimatedInputTokens, streamHeadersCommitted)
 }
 
 func estimateChatInputTokens(params map[string]any) int {
@@ -2609,6 +2629,32 @@ func writeAnthropicSemanticEmpty(w http.ResponseWriter, reqLog *RequestLog, diag
 	writeAnthropicError(w, details.Status, details.ErrorType, details.Message)
 }
 
+func emitAnthropicStreamError(w http.ResponseWriter, errorType, message string) {
+	payload, _ := json.Marshal(map[string]any{
+		"type": "error",
+		"error": map[string]any{
+			"type": errorType, "message": message,
+		},
+	})
+	_, _ = fmt.Fprintf(w, "event: error\ndata: %s\n\n", payload)
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func writeAnthropicPreparedStreamError(w http.ResponseWriter, reqLog *RequestLog, usage tokenUsage, err error) {
+	_, errorType := anthropicUpstreamErrorDetails(err)
+	finalizeRequestLog(reqLog, usage, time.Time{}, reqLog.StartedAt, false, err.Error())
+	emitAnthropicStreamError(w, errorType, err.Error())
+}
+
+func writeAnthropicSemanticEmptyStreamError(w http.ResponseWriter, reqLog *RequestLog, diagnostic semanticStreamDiagnostic, retrySuppressed bool, estimatedInputTokens int) {
+	recordSemanticEmptyDiagnostic(reqLog, diagnostic, retrySuppressed)
+	details := semanticEmptyResponseFor(reqLog.Model, estimatedInputTokens, reqLog.UpstreamAttempts)
+	finalizeRequestLog(reqLog, diagnostic.Usage, time.Time{}, reqLog.StartedAt, false, details.Message)
+	emitAnthropicStreamError(w, details.ErrorType, details.Message)
+}
+
 func handleAnthropicCountTokens(w http.ResponseWriter, r *http.Request) {
 	body, err := readLimitedRequestBody(w, r, maxProxyRequestBodyBytes)
 	if err != nil {
@@ -2633,12 +2679,15 @@ func handleAnthropicCountTokens(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *Account, reqLog *RequestLog, estimatedInputTokens int) {
+	handleAnthropicStreamPrepared(w, upstream, acc, reqLog, estimatedInputTokens, false)
+}
+
+func handleAnthropicStreamPrepared(w http.ResponseWriter, upstream *http.Response, acc *Account, reqLog *RequestLog, estimatedInputTokens int, headersCommitted bool) {
 	log.Printf("  anthropic stream: starting real-time forward")
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.WriteHeader(http.StatusOK)
+	setAnthropicStreamHeaders(w)
+	if !headersCommitted {
+		w.WriteHeader(http.StatusOK)
+	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		return
@@ -2793,10 +2842,12 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 		if err != nil {
 			if !errors.Is(err, io.EOF) {
 				streamFailure = fmt.Errorf("read upstream stream: %w", err)
-				emit("error", map[string]any{
-					"type":  "error",
-					"error": map[string]any{"type": "api_error", "message": streamFailure.Error()},
-				})
+				if !errors.Is(streamFailure, context.Canceled) {
+					emit("error", map[string]any{
+						"type":  "error",
+						"error": map[string]any{"type": "api_error", "message": streamFailure.Error()},
+					})
+				}
 			}
 			break
 		}
@@ -2981,6 +3032,10 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 	closeTextBlock()
 
 	if streamFailure != nil {
+		if recordAnthropicClientCancellation(reqLog, latestUsage, streamFailure) {
+			log.Printf("  anthropic client canceled request during stream")
+			return
+		}
 		finalizeRequestLog(reqLog, latestUsage, firstOutputAt, reqLog.StartedAt, false, streamFailure.Error())
 		log.Printf("  anthropic stream failed: finish=%s text=%v tools=%d reasoning_chars=%d error=%v",
 			upstreamFinishReason, hasText, len(pendingTools), reasoningChars, streamFailure)

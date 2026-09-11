@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,66 @@ import (
 	"testing"
 	"time"
 )
+
+func TestWaitForAnthropicStreamPreparationSendsCommentHeartbeat(t *testing.T) {
+	response := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("data: [DONE]\n\n"))}
+	recorder := httptest.NewRecorder()
+
+	result, headersCommitted := waitForAnthropicStreamPreparation(recorder, 5*time.Millisecond, func() anthropicStreamPreparation {
+		time.Sleep(25 * time.Millisecond)
+		return anthropicStreamPreparation{response: response}
+	})
+
+	if result.response != response || result.err != nil || !headersCommitted {
+		t.Fatalf("preparation result = %#v, committed=%v", result, headersCommitted)
+	}
+	if body := recorder.Body.String(); !strings.Contains(body, ":\n\n") || strings.Contains(body, "ping") {
+		t.Fatalf("Anthropic preparation heartbeat = %q", body)
+	}
+	if contentType := recorder.Header().Get("Content-Type"); contentType != "text/event-stream" {
+		t.Fatalf("heartbeat content type = %q", contentType)
+	}
+}
+
+func TestRecordAnthropicClientCancellationUsesDedicatedErrorCode(t *testing.T) {
+	reqLog := &RequestLog{StartedAt: time.Now(), Protocol: "anthropic", Model: "m1", Stream: true}
+	err := &clineAccountUnavailableError{err: context.Canceled}
+
+	if !recordAnthropicClientCancellation(reqLog, tokenUsage{}, err) {
+		t.Fatal("wrapped context cancellation was not recognized")
+	}
+	if reqLog.Completed || reqLog.ErrorCode != "client_cancelled" || reqLog.Error != "client canceled request" {
+		t.Fatalf("cancellation request log = %#v", reqLog)
+	}
+}
+
+type contextCanceledReader struct{}
+
+func (contextCanceledReader) Read([]byte) (int, error) {
+	return 0, context.Canceled
+}
+
+func TestHandleAnthropicStreamRecordsClientCancellationWithoutSSEError(t *testing.T) {
+	upstream := &http.Response{Body: io.NopCloser(io.MultiReader(
+		strings.NewReader(`data: {"choices":[{"delta":{"reasoning_content":"thinking"}}]}`+"\n\n"),
+		contextCanceledReader{},
+	))}
+	account := &Account{AccountID: "active", Status: "active", ModelCooldowns: map[string]time.Time{}}
+	recorder := httptest.NewRecorder()
+	reqLog := &RequestLog{StartedAt: time.Now(), Protocol: "anthropic", Model: "m1", Stream: true}
+
+	handleAnthropicStream(recorder, upstream, account, reqLog, 10)
+
+	if reqLog.Completed || reqLog.ErrorCode != clientCancelledErrorCode || reqLog.Error != "client canceled request" {
+		t.Fatalf("stream cancellation request log = %#v", reqLog)
+	}
+	if strings.Contains(recorder.Body.String(), "event: error") {
+		t.Fatalf("canceled downstream received an SSE error: %q", recorder.Body.String())
+	}
+	if account.Status != "active" || len(account.ModelCooldowns) != 0 {
+		t.Fatalf("client cancellation changed account state: %#v", account)
+	}
+}
 
 func TestHandleAnthropicStreamPreservesReasoningBeforeToolUse(t *testing.T) {
 	upstreamBody := strings.Join([]string{
