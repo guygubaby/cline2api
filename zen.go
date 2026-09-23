@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -48,12 +50,14 @@ type zenSeedModel struct {
 
 var zenSeedModels = []zenSeedModel{
 	{ID: "deepseek-v4-flash-free", Aliases: []string{"deepseek-v4-flash", "deepseek-v4"}, Context: 200000, Output: 128000},
-	{ID: "mimo-v2.5-free", Aliases: []string{"mimo-v2.5", "mimo"}, Context: 200000, Output: 32000},
-	{ID: "ling-3.0-flash-free", Aliases: []string{"ling-3.0-flash", "ling"}, Context: 200000, Output: 32768},
+	{ID: "mimo-v2.6-flash-free", Aliases: []string{"mimo-v2.6-flash", "mimo-v2.6", "mimo"}, Context: 200000, Output: 32000},
+	{ID: "mimo-v2.5-free", Aliases: []string{"mimo-v2.5"}, Context: 200000, Output: 32000},
+	{ID: "ling-3.0-flash-fin-free", Aliases: []string{"ling-3.0-flash", "ling"}, Context: 200000, Output: 32768},
 	{ID: "nemotron-3-ultra-free", Aliases: []string{"nemotron-3-ultra", "nemotron"}, Context: 1000000, Output: 128000},
-	{ID: "north-mini-code-free", Aliases: []string{"north-mini-code", "north-mini"}, Context: 256000, Output: 64000},
-	{ID: "laguna-s-2.1-free", Aliases: []string{"laguna-s-2.1", "laguna"}, Context: 200000, Output: 32768},
-	{ID: "longcat-2.0-free", Aliases: []string{"longcat-2.0", "longcat"}, Context: 200000, Output: 32768},
+	{ID: "nemotron-3.5-lightning-free", Aliases: []string{"nemotron-3.5-lightning"}, Context: 200000, Output: 32768},
+	{ID: "jev-1.13-free", Context: 200000, Output: 32768},
+	{ID: "muse-spark-1.3-contributor-free", Context: 200000, Output: 32768},
+	{ID: "muse-spark-1.2-contributor-free", Context: 200000, Output: 32768},
 	{ID: "big-pickle", Context: 200000, Output: 32000},
 }
 
@@ -475,20 +479,13 @@ func validateProxyList(proxies []string) error {
 	return nil
 }
 
-// ============ 客户端身份轮换 ============
-// opencode 服务端可能按 session / UA 维度记账限流；每次请求生成全新身份，
-// 等价于每个请求都来自一台新装的客户端。
+// ============ OpenCode client identity ============
 
-var zenUserAgents = []string{
-	"opencode/latest/1.18.14/cli",
-	"opencode/latest/1.18.13/cli",
-	"opencode/1.18.14/cli",
-	"opencode/1.18.13/cli",
-	"opencode/1.18.12/cli",
-	"opencode/1.18.11/cli",
-	"opencode/latest/1.18.14/desktop",
-	"opencode/latest/1.18.13/desktop",
-}
+const (
+	zenClientVersion             = "1.18.31"
+	zenBase62                    = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+	maxZenCollapsedResponseBytes = 64 << 20
+)
 
 func randHex(n int) string {
 	b := make([]byte, n)
@@ -509,6 +506,67 @@ func randIntn(n int) int {
 	return v % n
 }
 
+// zenIdentifier matches OpenCode's visible identifier shape: a 12-character
+// hexadecimal prefix followed by 14 base62 characters.
+func zenIdentifier() string {
+	nano := uint64(time.Now().UnixNano())
+	prefix := make([]byte, 12)
+	const hexDigits = "0123456789abcdef"
+	for i := 0; i < 6; i++ {
+		value := byte(nano >> (40 - 8*i))
+		prefix[i*2] = hexDigits[value>>4]
+		prefix[i*2+1] = hexDigits[value&0x0f]
+	}
+	random := make([]byte, 14)
+	_, _ = rand.Read(random)
+	for i, value := range random {
+		random[i] = zenBase62[int(value)%len(zenBase62)]
+	}
+	return string(prefix) + string(random)
+}
+
+func canonicalZenSession(seed string) string {
+	digest := sha256.Sum256([]byte(seed))
+	prefix := hex.EncodeToString(digest[:6])
+	suffix := make([]byte, 14)
+	for i := range suffix {
+		suffix[i] = zenBase62[int(digest[6+i])%len(zenBase62)]
+	}
+	return "ses_" + prefix + string(suffix)
+}
+
+// zenConversationSeed only uses tenant-scoped client signals. It deliberately
+// does not hash prompt text, because identical first prompts from different
+// callers must never share an upstream session.
+func zenConversationSeed(params map[string]any) string {
+	tenantScope, _ := params[proxyTenantScopeParamKey].(string)
+	for _, key := range []string{proxyClientSessionParamKey, "prompt_cache_key", "user", "safety_identifier"} {
+		if value, _ := params[key].(string); value != "" {
+			return tenantScope + "\x00" + key + "\x00" + value
+		}
+	}
+	if metadata, _ := params["metadata"].(map[string]any); metadata != nil {
+		if sessionID, _ := metadata["session_id"].(string); sessionID != "" {
+			return tenantScope + "\x00metadata.session_id\x00" + sessionID
+		}
+	}
+	if requestID, _ := params[proxyRequestIDParamKey].(string); requestID != "" {
+		return tenantScope + "\x00request\x00" + requestID
+	}
+	return ""
+}
+
+func zenSessionID(params map[string]any) string {
+	if seed := zenConversationSeed(params); seed != "" {
+		return canonicalZenSession(seed)
+	}
+	return "ses_" + zenIdentifier()
+}
+
+func zenUserAgent() string {
+	return fmt.Sprintf("opencode/%s (%s %s; %s)", zenClientVersion, runtime.GOOS, runtime.GOARCH, runtime.Version())
+}
+
 // withRetryJitter 在退避时长上叠加 0~25% 抖动，错开并发重试。
 func withRetryJitter(delay time.Duration) time.Duration {
 	if delay <= 0 {
@@ -517,29 +575,67 @@ func withRetryJitter(delay time.Duration) time.Duration {
 	return delay + time.Duration(float64(delay)*float64(randIntn(26))/100)
 }
 
-// freshZenIdentity 生成一组全新客户端身份（session, request-id, user-agent）。
-func freshZenIdentity() (string, string, string) {
-	return "sess_" + randHex(16),
-		"user_" + randHex(8),
-		zenUserAgents[randIntn(len(zenUserAgents))]
-}
-
 // ============ zen 上游调用 ============
 
+var anonymousCoreTools = []string{"bash", "edit", "glob", "grep", "read"}
+
+// ensureAnonymousTools supplies the agent-shaped tool list required by the
+// public free tier. Compatibility-only tools explicitly tell the model not to
+// call them, so clients only receive tools they actually declared whenever possible.
+func ensureAnonymousTools(body map[string]any) {
+	items, _ := body["tools"].([]any)
+	present := make(map[string]bool, len(items))
+	for _, rawTool := range items {
+		tool, _ := rawTool.(map[string]any)
+		function, _ := tool["function"].(map[string]any)
+		if name, _ := function["name"].(string); name != "" {
+			present[name] = true
+		}
+	}
+	for _, name := range anonymousCoreTools {
+		if present[name] {
+			continue
+		}
+		items = append(items, map[string]any{
+			"type": "function",
+			"function": map[string]any{
+				"name":        name,
+				"description": "OpenCode free-tier compatibility marker. Do not call this tool.",
+				"parameters": map[string]any{
+					"type":                 "object",
+					"properties":           map[string]any{},
+					"additionalProperties": false,
+				},
+			},
+		})
+	}
+	body["tools"] = items
+}
+
 // buildZenBody 构造 zen 请求体：只带 OpenAI 兼容字段，模型名改写为 zen 正式 ID。
-func buildZenBody(params map[string]any, stream bool) map[string]any {
+func buildZenBody(params map[string]any, stream, anonymous bool) map[string]any {
 	body := map[string]any{}
 	for _, key := range passThroughKeys {
 		if val, ok := params[key]; ok {
 			body[key] = val
 		}
 	}
-	for _, key := range []string{"model", "messages", "max_tokens", "max_completion_tokens"} {
+	for _, key := range []string{"model", "max_tokens", "max_completion_tokens"} {
 		if val, ok := params[key]; ok {
 			body[key] = val
 		}
 	}
-	body["stream"] = stream
+	if messages, ok := params["messages"].([]any); ok {
+		body["messages"] = sanitizeMessages(messages)
+	} else if messages, exists := params["messages"]; exists {
+		body["messages"] = messages
+	}
+	upstreamStream := stream || anonymous
+	body["stream"] = upstreamStream
+	if anonymous {
+		body["stream_options"] = map[string]any{"include_usage": true}
+		ensureAnonymousTools(body)
+	}
 	if model, ok := params["model"].(string); ok {
 		if m, ok := resolveZenInfo(model); ok {
 			body["model"] = m.ID
@@ -553,10 +649,11 @@ func buildZenBody(params map[string]any, stream bool) map[string]any {
 }
 
 // callZenAPI 调用 zen 上游：并发信号量 + 指数退避重试 + 代理冷却 + 故障转移计数。
-// 身份头每次轮换。返回的响应由调用方关闭。
+// 会话身份按租户稳定，请求身份每次轮换。返回的响应由调用方关闭。
 func callZenAPI(params map[string]any, stream bool) (*http.Response, error) {
 	cfg := getZenConfig()
-	bodyJSON, err := json.Marshal(buildZenBody(params, stream))
+	anonymous := strings.EqualFold(strings.TrimSpace(cfg.Key), "public")
+	bodyJSON, err := json.Marshal(buildZenBody(params, stream, anonymous))
 	if err != nil {
 		return nil, fmt.Errorf("marshal zen body: %w", err)
 	}
@@ -582,33 +679,42 @@ func callZenAPI(params map[string]any, stream bool) (*http.Response, error) {
 		retries = 3
 	}
 	delay := time.Second
+	sessionID := zenSessionID(params)
+	upstreamStream := stream || anonymous
 
 	for attempt := 0; ; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyJSON))
 		if err != nil {
 			return nil, fmt.Errorf("create zen request: %w", err)
 		}
-		sess, user, ua := freshZenIdentity()
+		requestID := "msg" + zenIdentifier()
 		req.Header.Set("Authorization", "Bearer "+cfg.Key)
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("User-Agent", ua)
-		req.Header.Set("x-opencode-session", sess)
-		req.Header.Set("x-opencode-request", user)
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		req.Header.Set("User-Agent", zenUserAgent())
+		req.Header.Set("x-opencode-project", "global")
+		req.Header.Set("x-opencode-session", sessionID)
+		req.Header.Set("x-opencode-request", requestID)
 		req.Header.Set("x-opencode-client", "cli")
+		req.Header.Set("x-session-affinity", sessionID)
+		req.Header.Set("X-Session-Id", sessionID)
 		if model, _ := params["model"].(string); model != "" {
 			if m, ok := resolveZenInfo(model); ok {
 				req.Header.Set("x-opencode-model", m.ID)
 			}
 		}
-		log.Printf("  zen upstream: model=%v stream=%v msgs=%d via=%s attempt=%d session=%s",
-			bodyParamsModel(params), stream, getMsgCount(params), describeZenProxy(), attempt+1, truncate(sess, 24))
+		log.Printf("  zen upstream: model=%v stream=%v downstream_stream=%v msgs=%d via=%s attempt=%d session=%s",
+			bodyParamsModel(params), upstreamStream, stream, getMsgCount(params), describeZenProxy(), attempt+1, truncate(sessionID, 30))
 
 		resp, err := getZenHTTPClient().Do(req)
 		if err != nil {
 			var networkError net.Error
-			if ctx.Err() != nil || (errors.As(err, &networkError) && networkError.Timeout()) {
-				markZenFail()
+			if ctx.Err() != nil {
 				return nil, fmt.Errorf("zen request: %w", err)
+			}
+			if errors.As(err, &networkError) && networkError.Timeout() {
+				markZenFail()
+				return nil, zenNetworkError(err)
 			}
 			// 网络错误：先退避重试，耗尽后计入故障转移。
 			if attempt < retries {
@@ -620,9 +726,26 @@ func callZenAPI(params map[string]any, stream bool) (*http.Response, error) {
 				continue
 			}
 			markZenFail()
-			return nil, fmt.Errorf("zen request: %w", err)
+			return nil, zenNetworkError(err)
 		}
 		if resp.StatusCode == http.StatusOK {
+			if anonymous && !stream {
+				collapsed, collapseErr := collapseZenStreamResponse(resp, bodyParamsModel(params))
+				if collapseErr != nil {
+					if attempt < retries {
+						log.Printf("  zen stream collapse failed (%v), retry %d/%d after %v", collapseErr, attempt+1, retries, delay)
+						if waitErr := waitForRetry(ctx, withRetryJitter(delay)); waitErr != nil {
+							return nil, waitErr
+						}
+						delay *= 2
+						continue
+					}
+					markZenFail()
+					return nil, collapseErr
+				}
+				markZenSuccess()
+				return collapsed, nil
+			}
 			markZenSuccess()
 			return resp, nil
 		}
@@ -681,6 +804,59 @@ func bodyParamsModel(params map[string]any) string {
 	return m
 }
 
+func zenNetworkError(err error) error {
+	return withZenNetworkHint(fmt.Errorf("zen request: %w", err))
+}
+
+func withZenNetworkHint(err error) error {
+	message := strings.ToLower(err.Error())
+	for _, signal := range []string{"timeout", "deadline exceeded", "handshake", "connection refused", "unreachable", "no such host", "connectex"} {
+		if strings.Contains(message, signal) {
+			return fmt.Errorf("%w (opencode.ai is unreachable; configure an OpenCode egress proxy in the admin page)", err)
+		}
+	}
+	return err
+}
+
+// collapseZenStreamResponse converts the public free tier's mandatory SSE
+// response back into a standard non-streaming Chat Completions response.
+func collapseZenStreamResponse(response *http.Response, fallbackModel string) (*http.Response, error) {
+	if response == nil || response.Body == nil {
+		return nil, fmt.Errorf("zen response body is missing")
+	}
+	if strings.Contains(strings.ToLower(response.Header.Get("Content-Type")), "application/json") {
+		return response, nil
+	}
+	defer response.Body.Close()
+	limited := &io.LimitedReader{R: response.Body, N: maxZenCollapsedResponseBytes + 1}
+	completion, err := aggregateChatCompletionStream(limited)
+	if err != nil {
+		return nil, fmt.Errorf("collapse zen stream: %w", err)
+	}
+	if limited.N <= 0 {
+		return nil, fmt.Errorf("collapse zen stream: response exceeded %d bytes", maxZenCollapsedResponseBytes)
+	}
+	if model, _ := completion["model"].(string); model == "" {
+		completion["model"] = fallbackModel
+	}
+	data, err := json.Marshal(completion)
+	if err != nil {
+		return nil, fmt.Errorf("collapse zen stream: %w", err)
+	}
+	log.Printf("  zen collapse: stream -> json (%d bytes)", len(data))
+	return &http.Response{
+		Status:        "200 OK",
+		StatusCode:    http.StatusOK,
+		Proto:         "HTTP/1.1",
+		ProtoMajor:    1,
+		ProtoMinor:    1,
+		Header:        http.Header{"Content-Type": []string{"application/json"}},
+		Body:          io.NopCloser(bytes.NewReader(data)),
+		ContentLength: int64(len(data)),
+		Request:       response.Request,
+	}, nil
+}
+
 // readAllLimited 读取响应体，最多 limit 字节（防御异常大的错误页）。
 func readAllLimited(r io.Reader, limit int64) []byte {
 	data, _ := io.ReadAll(io.LimitReader(r, limit))
@@ -716,20 +892,30 @@ func describeZenProxy() string {
 func syncZenModels() modelSyncResult {
 	res := modelSyncResult{SyncedAt: time.Now().Format(time.RFC3339)}
 	fail := func(err error) modelSyncResult {
-		log.Printf("zen models sync failed: %v", err)
-		res.Error = err.Error()
+		message := withZenNetworkHint(err).Error()
+		log.Printf("zen models sync failed: %s", message)
+		res.Error = message
 		return res
 	}
 
 	cfg := getZenConfig()
 	endpoint := strings.TrimRight(cfg.BaseURL, "/") + "/models"
-	req, err := http.NewRequest("GET", endpoint, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return fail(err)
 	}
+	sessionID := "ses_" + zenIdentifier()
 	req.Header.Set("Authorization", "Bearer "+cfg.Key)
-	client := &http.Client{Timeout: 25 * time.Second}
-	resp, err := client.Do(req)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", zenUserAgent())
+	req.Header.Set("x-opencode-project", "global")
+	req.Header.Set("x-opencode-session", sessionID)
+	req.Header.Set("x-opencode-client", "cli")
+	req.Header.Set("x-session-affinity", sessionID)
+	req.Header.Set("X-Session-Id", sessionID)
+	resp, err := getZenHTTPClient().Do(req)
 	if err != nil {
 		return fail(err)
 	}

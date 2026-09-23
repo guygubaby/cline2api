@@ -105,7 +105,7 @@ func responsesToChat(body map[string]any) map[string]any {
 	if mt, ok := body["max_output_tokens"].(float64); ok {
 		out["max_tokens"] = int(mt)
 	}
-	for _, k := range []string{"temperature", "top_p", "stop", "seed", "user", "metadata", "logit_bias"} {
+	for _, k := range []string{"temperature", "top_p", "stop", "seed", "user", "metadata", "logit_bias", "prompt_cache_key", "safety_identifier"} {
 		if v, ok := body[k]; ok {
 			out[k] = v
 		}
@@ -114,7 +114,7 @@ func responsesToChat(body map[string]any) map[string]any {
 	if instr, ok := body["instructions"].(string); ok && instr != "" {
 		msgs = append([]any{map[string]any{"role": "system", "content": instr}}, msgs...)
 	}
-	out["messages"] = msgs
+	out["messages"] = sanitizeMessages(msgs)
 	if tools, ok := body["tools"].([]any); ok {
 		out["tools"] = responsesToolsToChat(tools)
 	}
@@ -531,13 +531,16 @@ func chatToResponses(chat map[string]any) map[string]any {
 					continue
 				}
 				function, _ := callMap["function"].(map[string]any)
+				name, _ := function["name"].(string)
+				if strings.TrimSpace(name) == "" {
+					continue
+				}
 				callID, _ := callMap["id"].(string)
 				if callID == "" {
 					callID = newResponseID("call_")
 				}
-				name, arguments := "", ""
+				arguments := ""
 				if function != nil {
-					name, _ = function["name"].(string)
 					arguments, _ = function["arguments"].(string)
 				}
 				outputs = append(outputs, map[string]any{
@@ -1346,6 +1349,7 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 		reqLog.Upstream = upstreamOpenCode
 		zm, _ := resolveZenInfo(chatModel)
 		rawSessionID := requestSessionID(chat, r.Header)
+		attachClientSessionIdentity(chat, requestTenantScope(r), rawSessionID)
 		out := maybeCompact(chat, zm, namespaceCompactSessionID(requestTenantScope(r), rawSessionID))
 		if out.changed {
 			log.Printf("  responses %s", out.note)

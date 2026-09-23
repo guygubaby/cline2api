@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -400,7 +401,7 @@ func TestBuildZenBodyRewritesModelAndStripsReasoning(t *testing.T) {
 		"stream":     true,
 		"tools":      []any{},
 	}
-	body := buildZenBody(params, true)
+	body := buildZenBody(params, true, false)
 	if body["model"] != "deepseek-v4-flash-free" {
 		t.Errorf("model alias rewrite failed: %v", body["model"])
 	}
@@ -414,6 +415,75 @@ func TestBuildZenBodyRewritesModelAndStripsReasoning(t *testing.T) {
 	}
 	if body["session_id"] != nil {
 		t.Error("zen body must not carry cline session_id")
+	}
+}
+
+func TestBuildZenBodyAnonymousUsesAgentShape(t *testing.T) {
+	params := map[string]any{
+		"model":    "deepseek-v4-flash",
+		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+	}
+	body := buildZenBody(params, false, true)
+	if body["stream"] != true {
+		t.Fatal("anonymous zen request must stream upstream")
+	}
+	streamOptions, _ := body["stream_options"].(map[string]any)
+	if streamOptions["include_usage"] != true {
+		t.Fatalf("stream_options = %#v", streamOptions)
+	}
+	tools, _ := body["tools"].([]any)
+	if len(tools) != len(anonymousCoreTools) {
+		t.Fatalf("tools = %d, want %d", len(tools), len(anonymousCoreTools))
+	}
+}
+
+func TestZenSessionIdentityIsCanonicalAndTenantScoped(t *testing.T) {
+	pattern := regexp.MustCompile(`^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$`)
+	first := map[string]any{proxyTenantScopeParamKey: "tenant-a"}
+	attachClientSessionIdentity(first, "tenant-a", "shared-session")
+	firstID := zenSessionID(first)
+	if !pattern.MatchString(firstID) {
+		t.Fatalf("session %q is not canonical", firstID)
+	}
+	if next := zenSessionID(first); next != firstID {
+		t.Fatalf("stable session changed: %q != %q", next, firstID)
+	}
+	second := map[string]any{proxyTenantScopeParamKey: "tenant-b"}
+	attachClientSessionIdentity(second, "tenant-b", "shared-session")
+	if secondID := zenSessionID(second); secondID == firstID {
+		t.Fatal("different tenants shared the same upstream session")
+	}
+}
+
+func TestCollapseZenStreamResponse(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"id":"chatcmpl_1","model":"deepseek-v4-flash-free","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"think "}}]}`,
+		`data: {"choices":[{"index":0,"delta":{"content":"done"},"finish_reason":"stop"}]}`,
+		`data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	response, err := collapseZenStreamResponse(&http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(stream)),
+	}, "fallback")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var completion map[string]any
+	if err := json.NewDecoder(response.Body).Decode(&completion); err != nil {
+		t.Fatal(err)
+	}
+	if getNested(completion, "choices", 0, "message", "content") != "done" {
+		t.Fatalf("completion = %#v", completion)
+	}
+	if getNested(completion, "choices", 0, "message", "reasoning_content") != "think " {
+		t.Fatalf("reasoning = %#v", completion)
+	}
+	if getNested(completion, "usage", "total_tokens") != float64(12) {
+		t.Fatalf("usage = %#v", completion["usage"])
 	}
 }
 

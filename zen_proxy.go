@@ -17,6 +17,7 @@ import (
 	"time"
 
 	utls "github.com/refraction-networking/utls"
+	"golang.org/x/net/http/httpproxy"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/proxy"
 )
@@ -90,7 +91,11 @@ func zenHTTP2Transport() *http2.Transport {
 func zenDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	p, _ := pickZenProxy()
 	if p == "" {
-		d := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+		targetURL := &url.URL{Scheme: "https", Host: addr}
+		if proxyURL, err := httpproxy.FromEnvironment().ProxyFunc()(targetURL); err == nil && proxyURL != nil {
+			return dialViaProxy(ctx, proxyURL.String(), network, addr)
+		}
+		d := &net.Dialer{Timeout: 12 * time.Second, KeepAlive: 30 * time.Second}
 		return d.DialContext(ctx, network, addr)
 	}
 	return dialViaProxy(ctx, p, network, addr)

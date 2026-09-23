@@ -516,6 +516,7 @@ func startProxy(host string, port int) error {
 			reqLog.Upstream = upstreamOpenCode
 			zm, _ := resolveZenInfo(model)
 			rawSessionID := requestSessionID(params, r.Header)
+			attachClientSessionIdentity(params, requestTenantScope(r), rawSessionID)
 			out := maybeCompact(params, zm, namespaceCompactSessionID(requestTenantScope(r), rawSessionID))
 			if out.changed {
 				log.Printf("  chat %s", out.note)
@@ -697,16 +698,88 @@ func writeJSON(w http.ResponseWriter, status int, data any) {
 }
 
 func cleanMessages(messages []any) []any {
-	cleaned := make([]any, 0, len(messages))
-	for _, m := range messages {
-		msg, ok := m.(map[string]any)
-		if !ok {
-			cleaned = append(cleaned, m)
+	return sanitizeMessages(messages)
+}
+
+// sanitizeMessages removes malformed tool calls before history is sent upstream.
+// A single empty function name or orphan tool result can otherwise poison every
+// subsequent turn with a permanent upstream 400 response.
+func sanitizeMessages(messages []any) []any {
+	validToolIDs := make(map[string]struct{})
+	for _, rawMessage := range messages {
+		message, _ := rawMessage.(map[string]any)
+		if message == nil || message["role"] != "assistant" {
 			continue
 		}
-		cleaned = append(cleaned, msg)
+		toolCalls, _ := message["tool_calls"].([]any)
+		for _, rawCall := range toolCalls {
+			call, _ := rawCall.(map[string]any)
+			function, _ := call["function"].(map[string]any)
+			name, _ := function["name"].(string)
+			id, _ := call["id"].(string)
+			if strings.TrimSpace(name) != "" && strings.TrimSpace(id) != "" {
+				validToolIDs[id] = struct{}{}
+			}
+		}
+	}
+
+	cleaned := make([]any, 0, len(messages))
+	for _, rawMessage := range messages {
+		message, ok := rawMessage.(map[string]any)
+		if !ok {
+			cleaned = append(cleaned, rawMessage)
+			continue
+		}
+		role, _ := message["role"].(string)
+		if role == "tool" {
+			id, _ := message["tool_call_id"].(string)
+			if _, valid := validToolIDs[id]; !valid {
+				continue
+			}
+		}
+
+		copyMessage := make(map[string]any, len(message))
+		for key, value := range message {
+			copyMessage[key] = value
+		}
+		if role == "assistant" {
+			if toolCalls, exists := message["tool_calls"].([]any); exists {
+				kept := make([]any, 0, len(toolCalls))
+				for _, rawCall := range toolCalls {
+					call, _ := rawCall.(map[string]any)
+					function, _ := call["function"].(map[string]any)
+					name, _ := function["name"].(string)
+					id, _ := call["id"].(string)
+					if strings.TrimSpace(name) == "" || strings.TrimSpace(id) == "" {
+						continue
+					}
+					kept = append(kept, call)
+				}
+				if len(kept) == 0 {
+					delete(copyMessage, "tool_calls")
+				} else {
+					copyMessage["tool_calls"] = kept
+				}
+			}
+		}
+		cleaned = append(cleaned, copyMessage)
 	}
 	return cleaned
+}
+
+func newToolUseID() string {
+	return "toolu_" + secureRandomHex(12)
+}
+
+func hasToolUseBlock(content any) bool {
+	blocks, _ := content.([]any)
+	for _, rawBlock := range blocks {
+		block, _ := rawBlock.(map[string]any)
+		if block != nil && block["type"] == "tool_use" {
+			return true
+		}
+	}
+	return false
 }
 
 func integerTokenLimit(value any) (int, bool) {
@@ -2051,6 +2124,10 @@ func anthropicContentToOpenAI(blocks []any) (any, []any, []any, string) {
 				}
 			}
 		case "tool_use":
+			name, _ := block["name"].(string)
+			if strings.TrimSpace(name) == "" {
+				continue
+			}
 			arguments := "{}"
 			if input := block["input"]; input != nil {
 				if value, ok := input.(string); ok {
@@ -2059,11 +2136,15 @@ func anthropicContentToOpenAI(blocks []any) (any, []any, []any, string) {
 					arguments = string(encoded)
 				}
 			}
+			id, _ := block["id"].(string)
+			if id == "" {
+				id = newToolUseID()
+			}
 			toolCalls = append(toolCalls, map[string]any{
-				"id":   block["id"],
+				"id":   id,
 				"type": "function",
 				"function": map[string]any{
-					"name":      block["name"],
+					"name":      name,
 					"arguments": arguments,
 				},
 			})
@@ -2188,7 +2269,7 @@ func anthropicToOpenAI(req anthropicReq) map[string]any {
 		}
 	}
 
-	openAI["messages"] = msgs
+	openAI["messages"] = sanitizeMessages(msgs)
 	return openAI
 }
 
@@ -2309,6 +2390,10 @@ func openAIToAnthropic(openAI map[string]any) map[string]any {
 					if funcData == nil {
 						continue
 					}
+					name, _ := funcData["name"].(string)
+					if strings.TrimSpace(name) == "" {
+						continue
+					}
 					input := funcData["arguments"]
 					// OpenAI arguments is a JSON string; Anthropic expects an object
 					if argsStr, ok := input.(string); ok {
@@ -2317,10 +2402,14 @@ func openAIToAnthropic(openAI map[string]any) map[string]any {
 							input = argsObj
 						}
 					}
+					id, _ := tcMap["id"].(string)
+					if id == "" {
+						id = newToolUseID()
+					}
 					block := map[string]any{
 						"type":  "tool_use",
-						"id":    tcMap["id"],
-						"name":  funcData["name"],
+						"id":    id,
+						"name":  name,
 						"input": input,
 					}
 					contentBlocks = append(contentBlocks, block)
@@ -2340,7 +2429,11 @@ func openAIToAnthropic(openAI map[string]any) map[string]any {
 	case "length":
 		out["stop_reason"] = "max_tokens"
 	case "tool_calls":
-		out["stop_reason"] = "tool_use"
+		if hasToolUseBlock(contentBlocks) {
+			out["stop_reason"] = "tool_use"
+		} else {
+			out["stop_reason"] = "end_turn"
+		}
 	case "content_filter":
 		out["stop_reason"] = "refusal"
 	default:
@@ -2447,6 +2540,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		reqLog.Upstream = upstreamOpenCode
 		zm, _ := resolveZenInfo(req.Model)
 		rawSessionID := r.Header.Get("x-opencode-session")
+		attachClientSessionIdentity(openAIReq, requestTenantScope(r), rawSessionID)
 		out := maybeCompact(openAIReq, zm, namespaceCompactSessionID(requestTenantScope(r), rawSessionID))
 		if out.changed {
 			log.Printf("  anthropic %s", out.note)
@@ -3022,8 +3116,6 @@ func handleAnthropicStreamPrepared(w http.ResponseWriter, upstream *http.Respons
 			switch fr {
 			case "length":
 				stopReason = "max_tokens"
-			case "tool_calls":
-				stopReason = "tool_use"
 			}
 		}
 	}
@@ -3046,8 +3138,11 @@ func handleAnthropicStreamPrepared(w http.ResponseWriter, upstream *http.Respons
 	// accumulated value using Anthropic's input_json_delta event sequence.
 	for _, upstreamIndex := range toolOrder {
 		acc := pendingTools[upstreamIndex]
-		if acc.id == "" || acc.name == "" {
+		if strings.TrimSpace(acc.name) == "" {
 			continue
+		}
+		if acc.id == "" {
+			acc.id = newToolUseID()
 		}
 		if acc.started {
 			closeStartedTool(acc)
@@ -3057,7 +3152,7 @@ func handleAnthropicStreamPrepared(w http.ResponseWriter, upstream *http.Respons
 		}
 		emittedTools++
 	}
-	if len(toolOrder) > 0 {
+	if emittedTools > 0 {
 		stopReason = "tool_use"
 	}
 	if reasoningChars == 0 && !hasText && emittedTools == 0 {
@@ -3163,10 +3258,32 @@ func normalizeChatToolCalls(value any, streaming bool) []any {
 		}
 		cleanCall := copyAllowedFields(call, fields...)
 		if function, _ := cleanCall["function"].(map[string]any); function != nil {
-			cleanCall["function"] = copyAllowedFields(function, "name", "arguments")
+			cleanFunction := copyAllowedFields(function, "name", "arguments")
+			if !streaming {
+				name, _ := cleanFunction["name"].(string)
+				if strings.TrimSpace(name) == "" {
+					continue
+				}
+			}
+			cleanCall["function"] = cleanFunction
 		}
 		if custom, _ := cleanCall["custom"].(map[string]any); custom != nil {
-			cleanCall["custom"] = copyAllowedFields(custom, "name", "input")
+			cleanCustom := copyAllowedFields(custom, "name", "input")
+			if !streaming {
+				name, _ := cleanCustom["name"].(string)
+				if strings.TrimSpace(name) == "" {
+					continue
+				}
+			}
+			cleanCall["custom"] = cleanCustom
+		}
+		if !streaming {
+			if cleanCall["function"] == nil && cleanCall["custom"] == nil {
+				continue
+			}
+			if id, _ := cleanCall["id"].(string); id == "" {
+				cleanCall["id"] = newResponseID("call_")
+			}
 		}
 		normalized = append(normalized, cleanCall)
 	}
@@ -3184,9 +3301,14 @@ func normalizeChatMessageFields(value any, streaming bool) map[string]any {
 	}
 	out := copyAllowedFields(message, fields...)
 	if _, exists := out["tool_calls"]; exists {
-		out["tool_calls"] = normalizeChatToolCalls(out["tool_calls"], streaming)
-		if _, hasContent := out["content"]; !hasContent {
-			out["content"] = ""
+		toolCalls := normalizeChatToolCalls(out["tool_calls"], streaming)
+		if len(toolCalls) == 0 {
+			delete(out, "tool_calls")
+		} else {
+			out["tool_calls"] = toolCalls
+			if _, hasContent := out["content"]; !hasContent {
+				out["content"] = ""
+			}
 		}
 	}
 	return out
@@ -3252,7 +3374,11 @@ func normalizeOpenAIChatResponse(obj map[string]any, fallbackModel string, strea
 		if streaming {
 			cleanChoice["delta"] = normalizeChatMessageFields(choice["delta"], true)
 		} else {
-			cleanChoice["message"] = normalizeChatMessageFields(choice["message"], false)
+			message := normalizeChatMessageFields(choice["message"], false)
+			cleanChoice["message"] = message
+			if cleanChoice["finish_reason"] == "tool_calls" && message["tool_calls"] == nil {
+				cleanChoice["finish_reason"] = "stop"
+			}
 		}
 		normalizedChoices = append(normalizedChoices, cleanChoice)
 	}

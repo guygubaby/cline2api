@@ -23,6 +23,7 @@ const (
 	proxyUpstreamTTFTParamKey   = "_cline2api_upstream_ttft_ms"
 	proxyRequestContextParamKey = "_cline2api_request_context"
 	proxyAuditHashParamKey      = "_cline2api_audit_hash"
+	proxyClientSessionParamKey  = "_cline2api_client_session"
 	responseAuditPrefixBytes    = 64 << 10
 )
 
@@ -146,6 +147,13 @@ func attachRequestIsolation(params map[string]any, requestID, tenantScope string
 	params[proxyRequestIDParamKey] = requestID
 	params[proxyTenantScopeParamKey] = tenantScope
 	namespaceClientRequestIdentity(params, tenantScope)
+}
+
+func attachClientSessionIdentity(params map[string]any, tenantScope, sessionID string) {
+	if params == nil || sessionID == "" {
+		return
+	}
+	params[proxyClientSessionParamKey] = scopedIdentityHash("client-session-v1", tenantScope, sessionID)
 }
 
 func proxyRequestAuditFields(params map[string]any) (string, string) {
