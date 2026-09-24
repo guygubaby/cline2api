@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1589,6 +1590,26 @@ func handleAdminStats(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
 		return
 	}
+	period := r.URL.Query().Get("range")
+	if period == "" {
+		period = "today"
+	}
+	switch period {
+	case "today", "1d", "7d", "14d", "30d":
+	default:
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "invalid stats range"})
+		return
+	}
+	_, offsetSeconds := time.Now().Zone()
+	timezoneOffsetMinutes := -offsetSeconds / 60
+	if rawOffset := r.URL.Query().Get("tzOffset"); rawOffset != "" {
+		value, err := strconv.Atoi(rawOffset)
+		if err != nil || value < -840 || value > 840 {
+			writeAPI(w, http.StatusBadRequest, apiResponse{Error: "invalid timezone offset"})
+			return
+		}
+		timezoneOffsetMinutes = value
+	}
 
 	p := loadPool()
 	active, cooldown, expired := 0, 0, 0
@@ -1621,6 +1642,7 @@ func handleAdminStats(w http.ResponseWriter, r *http.Request) {
 			"completionTokens": completionTokens,
 			"totalTokens":      totalTokens,
 			"cachedTokens":     cachedTokens,
+			"periodUsage":      summarizeRequestUsage(time.Now(), period, timezoneOffsetMinutes),
 			"strategy":         getProxyConfig().Strategy,
 			"version":          appVersion,
 			// opencode zen 免费模型今日用量（从请求日志聚合）

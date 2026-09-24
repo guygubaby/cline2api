@@ -64,6 +64,28 @@ button,a,summary{touch-action:manipulation}
 .page-header h2{font-size:28px;font-weight:700;letter-spacing:0}
 
 /* ===== Dashboard ===== */
+.flex-wrap{flex-wrap:wrap}
+.gap-8{gap:8px}
+.mb-12{margin-bottom:12px}
+.mb-20{margin-bottom:20px}
+.px-16{padding-left:16px;padding-right:16px}
+.py-8{padding-top:8px;padding-bottom:8px}
+.rounded-full{border-radius:999px}
+.border-subtle{border:1px solid var(--border2)}
+.border-transparent{border-color:transparent}
+.bg-surface{background:var(--surface)}
+.bg-surface2{background:var(--surface2)}
+.bg-accent{background:var(--accent)}
+.text-muted{color:var(--text2)}
+.text-white{color:#fff}
+.font-inherit{font:inherit}
+.font-medium{font-weight:500}
+.cursor-pointer{cursor:pointer}
+.overflow-x-auto{overflow-x:auto}
+.min-w-680{min-width:680px}
+.focus-ring:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.hover-accent:hover{border-color:var(--accent);color:var(--accent)}
+.bg-accent.hover-accent:hover{color:#fff;background:var(--accent-hover)}
 .metric-section{margin-bottom:26px}
 .metric-heading{font-size:13px;font-weight:600;color:var(--text2);margin:0 0 10px 2px}
 .cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}
@@ -203,6 +225,7 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
 .empty a:hover{text-decoration:underline}
 .mono{font-family:ui-monospace,'SF Mono','Cascadia Code','Consolas',monospace;font-size:12px}
 .flex{display:flex;align-items:center;gap:8px}
+.gap-12{gap:12px}
 .justify-between{display:flex;justify-content:space-between;align-items:center}
 .text-right{text-align:right}
 .mt-8{margin-top:8px}
@@ -446,6 +469,36 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
       <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a10 10 0 1 0 10 10"/><path d="M12 6v6l4 2"/></svg></div>
       <div class="num" id="statCachedTokens">-</div><div class="label">缓存 Token</div>
     </div>
+    </div>
+  </div>
+  <div class="metric-section">
+    <div class="metric-heading" id="periodHeading">按日期统计</div>
+    <div class="flex flex-wrap gap-8 mb-12" role="group" aria-labelledby="periodHeading" id="statsRangeChoices">
+      <button type="button" class="px-16 py-8 rounded-full border-subtle border-transparent bg-accent text-white font-inherit font-medium cursor-pointer focus-ring hover-accent" data-range="today" aria-pressed="true">今天</button>
+      <button type="button" class="px-16 py-8 rounded-full border-subtle bg-surface text-muted font-inherit font-medium cursor-pointer focus-ring hover-accent" data-range="1d" aria-pressed="false" title="最近 24 小时">1d</button>
+      <button type="button" class="px-16 py-8 rounded-full border-subtle bg-surface text-muted font-inherit font-medium cursor-pointer focus-ring hover-accent" data-range="7d" aria-pressed="false">7d</button>
+      <button type="button" class="px-16 py-8 rounded-full border-subtle bg-surface text-muted font-inherit font-medium cursor-pointer focus-ring hover-accent" data-range="14d" aria-pressed="false">14d</button>
+      <button type="button" class="px-16 py-8 rounded-full border-subtle bg-surface text-muted font-inherit font-medium cursor-pointer focus-ring hover-accent" data-range="30d" aria-pressed="false">30d</button>
+    </div>
+    <div class="flex flex-wrap gap-12 mb-20">
+      <label for="statsRefreshInterval" class="text-muted">自动刷新</label>
+      <select id="statsRefreshInterval" class="px-16 py-8 rounded-full border-subtle bg-surface font-inherit cursor-pointer focus-ring">
+        <option value="5000">5s</option>
+        <option value="10000" selected>10s</option>
+        <option value="30000">30s</option>
+      </select>
+    </div>
+    <div class="section">
+      <div class="section-title">每日明细</div>
+      <div class="section-desc">基于最近 30 天保留的请求日志，最多 5000 条</div>
+      <div class="overflow-x-auto">
+        <table class="min-w-680">
+          <caption class="visually-hidden">每日明细</caption>
+          <thead><tr><th scope="col">日期</th><th scope="col">请求</th><th scope="col">输入 Token</th><th scope="col">输出 Token</th><th scope="col">缓存 Token</th><th scope="col">总 Token</th></tr></thead>
+          <tbody id="statsDailyBody"><tr><td colspan="6" class="empty">加载中…</td></tr></tbody>
+          <tfoot><tr class="bg-surface2 font-medium"><th scope="row">合计</th><td id="statsPeriodRequests">-</td><td id="statsPeriodInputTokens">-</td><td id="statsPeriodOutputTokens">-</td><td id="statsPeriodCachedTokens">-</td><td id="statsPeriodTotalTokens">-</td></tr></tfoot>
+        </table>
+      </div>
     </div>
   </div>
   <div class="metric-section">
@@ -1089,6 +1142,16 @@ const I18N = {
   '冷却': 'Cooldown',
   '已过期': 'Expired',
   'Token 用量': 'Token Usage',
+  '按日期统计': 'Usage by Date',
+  '今天': 'Today',
+  '最近 24 小时': 'Last 24 hours',
+  '自动刷新': 'Auto refresh',
+  '输入 Token': 'Input Tokens',
+  '输出 Token': 'Output Tokens',
+  '每日明细': 'Daily Breakdown',
+  '合计': 'Period Total',
+  '基于最近 30 天保留的请求日志，最多 5000 条': 'Based on retained request logs from the last 30 days, up to 5,000 entries',
+  '日期': 'Date',
   '累计输入 Token': 'Total Input Tokens',
   '累计输出 Token': 'Total Output Tokens',
   '累计总 Token': 'Total Tokens',
@@ -1623,9 +1686,46 @@ async function openExternal(url) {
 }
 
 // ========== 仪表盘 ==========
+const STATS_RANGES = ['today', '1d', '7d', '14d', '30d'];
+const STATS_REFRESH_INTERVALS = [5000, 10000, 30000];
+let _statsRange = 'today';
+let _statsRefreshMs = 10000;
+let _statsRequestId = 0;
+let _statsTimer;
+try {
+  const savedRange = localStorage.getItem('cline_dashboard_range');
+  const savedRefresh = Number(localStorage.getItem('cline_dashboard_refresh'));
+  if (STATS_RANGES.includes(savedRange)) _statsRange = savedRange;
+  if (STATS_REFRESH_INTERVALS.includes(savedRefresh)) _statsRefreshMs = savedRefresh;
+} catch (e) { /* storage may be unavailable */ }
+
+function syncStatsRangeButtons() {
+  document.querySelectorAll('#statsRangeChoices button').forEach(button => {
+    const selected = button.dataset.range === _statsRange;
+    button.setAttribute('aria-pressed', String(selected));
+    button.classList.toggle('bg-accent', selected);
+    button.classList.toggle('border-transparent', selected);
+    button.classList.toggle('text-white', selected);
+    button.classList.toggle('bg-surface', !selected);
+    button.classList.toggle('text-muted', !selected);
+  });
+}
+
+function setStatsRefreshInterval(ms) {
+  if (!STATS_REFRESH_INTERVALS.includes(ms)) return;
+  _statsRefreshMs = ms;
+  try { localStorage.setItem('cline_dashboard_refresh', String(ms)); } catch (e) {}
+  clearInterval(_statsTimer);
+  _statsTimer = setInterval(() => {
+    if (!document.hidden && activeTabName() === 'dashboard') loadStats();
+  }, ms);
+}
+
 async function loadStats() {
+  const requestId = ++_statsRequestId;
   try {
-    const d = await api('GET', '/stats');
+    const d = await api('GET', '/stats?range=' + encodeURIComponent(_statsRange) + '&tzOffset=' + new Date().getTimezoneOffset());
+    if (requestId !== _statsRequestId) return;
     const s = d.data;
     _('statTotal').textContent = s.total;
     _('statActive').textContent = s.active;
@@ -1635,6 +1735,21 @@ async function loadStats() {
     _('statCompletionTokens').textContent = formatTokenCount(s.completionTokens);
     _('statTotalTokens').textContent = formatTokenCount(s.totalTokens);
     _('statCachedTokens').textContent = formatTokenCount(s.cachedTokens);
+    const usage = s.periodUsage || {};
+    const summary = usage.summary || {};
+    _('statsPeriodRequests').textContent = formatNumber(summary.requests);
+    _('statsPeriodInputTokens').textContent = formatTokenCount(summary.inputTokens);
+    _('statsPeriodOutputTokens').textContent = formatTokenCount(summary.outputTokens);
+    _('statsPeriodCachedTokens').textContent = formatTokenCount(summary.cachedTokens);
+    _('statsPeriodTotalTokens').textContent = formatTokenCount(summary.totalTokens);
+    _('statsDailyBody').innerHTML = (usage.days || []).map(day =>
+      '<tr><th scope="row">' + esc(day.date) + '</th>' +
+      '<td>' + formatNumber(day.requests) + '</td>' +
+      '<td>' + formatTokenCount(day.inputTokens) + '</td>' +
+      '<td>' + formatTokenCount(day.outputTokens) + '</td>' +
+      '<td>' + formatTokenCount(day.cachedTokens) + '</td>' +
+      '<td>' + formatTokenCount(day.totalTokens) + '</td></tr>'
+    ).join('');
     const oc = s.opencodeToday || {};
     _('statOcRequests').textContent = oc.requests != null ? oc.requests : '-';
     _('statOcInputTokens').textContent = formatTokenCount(oc.inputTokens || 0);
@@ -1642,7 +1757,11 @@ async function loadStats() {
     _('statOcTotalTokens').textContent = formatTokenCount(oc.totalTokens || 0);
     if (s.version) _('settingVersion').value = s.version;
     if (s.strategy) _('settingStrategy').value = s.strategy;
-  } catch (e) { /* ignore */ }
+  } catch (e) {
+    if (requestId === _statsRequestId && _('statsDailyBody').querySelector('.empty')) {
+      _('statsDailyBody').innerHTML = '<tr><td colspan="6" class="empty">' + t('加载失败') + '</td></tr>';
+    }
+  }
 }
 
 // ========== 账号管理 ==========
@@ -2853,10 +2972,22 @@ window.addEventListener('beforeunload', event => {
   event.preventDefault();
   event.returnValue = '';
 });
+syncStatsRangeButtons();
+document.querySelectorAll('#statsRangeChoices button').forEach(button => {
+  button.addEventListener('click', () => {
+    if (_statsRange === button.dataset.range) return;
+    _statsRange = button.dataset.range;
+    try { localStorage.setItem('cline_dashboard_range', _statsRange); } catch (e) {}
+    syncStatsRangeButtons();
+    ['statsPeriodRequests', 'statsPeriodInputTokens', 'statsPeriodOutputTokens', 'statsPeriodCachedTokens', 'statsPeriodTotalTokens'].forEach(id => _(id).textContent = '-');
+    _('statsDailyBody').innerHTML = '<tr><td colspan="6" class="empty">' + t('加载中…') + '</td></tr>';
+    loadStats();
+  });
+});
+_('statsRefreshInterval').value = String(_statsRefreshMs);
+_('statsRefreshInterval').addEventListener('change', event => setStatsRefreshInterval(Number(event.target.value)));
+setStatsRefreshInterval(_statsRefreshMs);
 switchTab(location.hash.slice(1) || 'dashboard', false);
-setInterval(() => {
-  if (!document.hidden && activeTabName() === 'dashboard') loadStats();
-}, 10000);
 </script>
 </body>
 </html>`

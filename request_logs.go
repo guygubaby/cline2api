@@ -232,6 +232,75 @@ type requestLogPage struct {
 	HasMore    bool         `json:"hasMore"`
 }
 
+type requestUsageSummary struct {
+	Requests     int64 `json:"requests"`
+	InputTokens  int64 `json:"inputTokens"`
+	OutputTokens int64 `json:"outputTokens"`
+	CachedTokens int64 `json:"cachedTokens"`
+	TotalTokens  int64 `json:"totalTokens"`
+}
+
+type requestUsageDay struct {
+	Date string `json:"date"`
+	requestUsageSummary
+}
+
+type requestUsagePeriod struct {
+	Summary requestUsageSummary `json:"summary"`
+	Days    []requestUsageDay   `json:"days"`
+}
+
+func (s *requestUsageSummary) add(entry RequestLog) {
+	s.Requests++
+	s.InputTokens += entry.InputTokens
+	s.OutputTokens += entry.OutputTokens
+	s.CachedTokens += entry.CachedTokens
+	s.TotalTokens += entry.TotalTokens
+}
+
+// summarizeRequestUsage groups retained request logs by the viewer's calendar dates.
+func summarizeRequestUsage(now time.Time, period string, timezoneOffsetMinutes int) requestUsagePeriod {
+	location := time.FixedZone("dashboard", -timezoneOffsetMinutes*60)
+	localNow := now.In(location)
+	today := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 0, 0, 0, 0, location)
+	start := today
+	switch period {
+	case "1d":
+		start = now.Add(-24 * time.Hour)
+	case "7d":
+		start = today.AddDate(0, 0, -6)
+	case "14d":
+		start = today.AddDate(0, 0, -13)
+	case "30d":
+		start = today.AddDate(0, 0, -29)
+	}
+	localStart := start.In(location)
+	firstDay := time.Date(localStart.Year(), localStart.Month(), localStart.Day(), 0, 0, 0, 0, location)
+
+	result := requestUsagePeriod{Days: make([]requestUsageDay, 0, 30)}
+	dayIndexes := make(map[string]int)
+	for day := today; !day.Before(firstDay); day = day.AddDate(0, 0, -1) {
+		date := day.Format("2006-01-02")
+		dayIndexes[date] = len(result.Days)
+		result.Days = append(result.Days, requestUsageDay{Date: date})
+	}
+
+	requestLogsMu.Lock()
+	defer requestLogsMu.Unlock()
+	for _, entry := range requestLogs {
+		if entry.StartedAt.Before(start) || entry.StartedAt.After(now) {
+			continue
+		}
+		index, ok := dayIndexes[entry.StartedAt.In(location).Format("2006-01-02")]
+		if !ok {
+			continue
+		}
+		result.Summary.add(entry)
+		result.Days[index].requestUsageSummary.add(entry)
+	}
+	return result
+}
+
 func encodeCursor(entry RequestLog) string {
 	key := fmt.Sprintf("%d|%s", entry.StartedAt.UnixNano(), entry.ID)
 	return base64.RawURLEncoding.EncodeToString([]byte(key))

@@ -1,9 +1,45 @@
 package main
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 )
+
+func TestSummarizeRequestUsageByViewerDate(t *testing.T) {
+	now := time.Date(2026, 9, 24, 1, 0, 0, 0, time.UTC) // 09:00 in UTC+8
+	requestLogsMu.Lock()
+	previous := requestLogs
+	requestLogs = []RequestLog{
+		{StartedAt: now.Add(-30 * time.Minute), InputTokens: 10, OutputTokens: 5, CachedTokens: 2, TotalTokens: 15},
+		{StartedAt: now.Add(-10 * time.Hour), InputTokens: 20, OutputTokens: 7, TotalTokens: 27},
+		{StartedAt: now.Add(-25 * time.Hour), InputTokens: 30, TotalTokens: 30},
+		{StartedAt: now.Add(-8 * 24 * time.Hour), InputTokens: 40, TotalTokens: 40},
+	}
+	requestLogsMu.Unlock()
+	t.Cleanup(func() {
+		requestLogsMu.Lock()
+		requestLogs = previous
+		requestLogsMu.Unlock()
+	})
+
+	today := summarizeRequestUsage(now, "today", -480)
+	if today.Summary.Requests != 1 || today.Summary.TotalTokens != 15 || len(today.Days) != 1 || today.Days[0].Date != "2026-09-24" {
+		t.Fatalf("today usage = %+v", today)
+	}
+	lastDay := summarizeRequestUsage(now, "1d", -480)
+	if lastDay.Summary.Requests != 2 || lastDay.Summary.TotalTokens != 42 || len(lastDay.Days) != 2 || lastDay.Days[1].Date != "2026-09-23" {
+		t.Fatalf("last 24 hours usage = %+v", lastDay)
+	}
+	week := summarizeRequestUsage(now, "7d", -480)
+	if week.Summary.Requests != 3 || len(week.Days) != 7 || week.Days[6].Date != "2026-09-18" {
+		t.Fatalf("seven calendar days usage = %+v", week)
+	}
+	encoded, err := json.Marshal(week.Days[0])
+	if err != nil || string(encoded) != `{"date":"2026-09-24","requests":1,"inputTokens":10,"outputTokens":5,"cachedTokens":2,"totalTokens":15}` {
+		t.Fatalf("daily JSON = %s, err = %v", encoded, err)
+	}
+}
 
 func TestPruneRequestLogsBoundsAgeAndCount(t *testing.T) {
 	now := time.Now()
