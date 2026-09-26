@@ -274,6 +274,16 @@ func summarizeRequestUsage(now time.Time, period string, timezoneOffsetMinutes i
 	case "30d":
 		start = today.AddDate(0, 0, -29)
 	}
+	requestLogsMu.Lock()
+	defer requestLogsMu.Unlock()
+	if period == "all" {
+		cutoff := now.Add(-requestLogMaxAge)
+		for _, entry := range requestLogs {
+			if !entry.StartedAt.Before(cutoff) && !entry.StartedAt.After(now) && entry.StartedAt.Before(start) {
+				start = entry.StartedAt
+			}
+		}
+	}
 	localStart := start.In(location)
 	firstDay := time.Date(localStart.Year(), localStart.Month(), localStart.Day(), 0, 0, 0, 0, location)
 
@@ -285,8 +295,6 @@ func summarizeRequestUsage(now time.Time, period string, timezoneOffsetMinutes i
 		result.Days = append(result.Days, requestUsageDay{Date: date})
 	}
 
-	requestLogsMu.Lock()
-	defer requestLogsMu.Unlock()
 	for _, entry := range requestLogs {
 		if entry.StartedAt.Before(start) || entry.StartedAt.After(now) {
 			continue

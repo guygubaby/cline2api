@@ -80,37 +80,38 @@ button,a,summary{touch-action:manipulation}
 .text-white{color:#fff}
 .font-inherit{font:inherit}
 .font-medium{font-weight:500}
+.w-auto{width:auto}
 .cursor-pointer{cursor:pointer}
 .overflow-x-auto{overflow-x:auto}
 .min-w-680{min-width:680px}
 .focus-ring:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .hover-accent:hover{border-color:var(--accent);color:var(--accent)}
 .bg-accent.hover-accent:hover{color:#fff;background:var(--accent-hover)}
-.summary-panel{padding:24px;border:1px solid #34353b;border-radius:20px;background:#232429;color:#f7f8fa;margin-bottom:26px}
-.summary-top{display:flex;align-items:center;justify-content:space-between;gap:20px;flex-wrap:wrap}
-.summary-main{display:flex;align-items:center;gap:18px;min-width:0}
-.summary-icon{width:60px;height:60px;flex:none;display:grid;place-items:center;border-radius:18px;background:#243148;color:#248fff}
-.summary-icon svg{width:30px;height:30px}
-.summary-muted{color:#a6a8b2}
-.summary-label{font-size:13px;font-weight:600;letter-spacing:.03em}
-.summary-number-line{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
-.summary-number{font-size:clamp(30px,3vw,46px);line-height:1.18;font-weight:700;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
-.summary-approx{padding:3px 10px;border-radius:999px;background:#292a30;font-size:13px;white-space:nowrap}
-.summary-overview{display:flex;align-items:center;gap:24px;padding:16px 22px;border:1px solid #34353b;border-radius:18px;background:#202126}
-.summary-overview>div+div{padding-left:24px;border-left:1px solid #34353b}
-.summary-overview-value{font-size:23px;font-weight:600;line-height:1.25;font-variant-numeric:tabular-nums}
-.summary-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin-top:20px}
-.summary-tile{min-width:0;min-height:104px;padding:17px 18px;border:1px solid #34353b;border-radius:17px;background:#202126}
-.summary-tile-value{margin-top:9px;font-size:22px;font-weight:600;line-height:1.2;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
-.summary-green{color:#12b981}
-.summary-progress{display:block;width:100%;height:9px;margin-top:14px;border:0;border-radius:999px;overflow:hidden;background:#393b42;accent-color:#12b981}
-.summary-progress::-webkit-progress-bar{background:#393b42;border-radius:999px}
-.summary-progress::-webkit-progress-value{background:#12b981;border-radius:999px}
-.summary-progress::-moz-progress-bar{background:#12b981;border-radius:999px}
-.summary-note{margin-top:12px;font-size:12px}
+.summary-panel{padding:20px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text);box-shadow:var(--shadow-sm);margin-bottom:26px}
+.summary-top{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}
+.summary-main{display:flex;align-items:center;gap:12px;min-width:0}
+.summary-icon{width:44px;height:44px;flex:none;display:grid;place-items:center;border-radius:12px;background:var(--accent-soft);color:var(--accent)}
+.summary-icon svg{width:23px;height:23px}
+.summary-muted{color:var(--text2)}
+.summary-label{font-size:12px;font-weight:600}
+.summary-number-line{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+.summary-number{font-size:clamp(25px,2.4vw,34px);line-height:1.18;font-weight:700;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.summary-approx{padding:2px 8px;border-radius:999px;background:var(--surface2);font-size:12px;white-space:nowrap}
+.summary-overview{display:flex;align-items:center;gap:16px;padding:12px 16px;border:1px solid var(--border2);border-radius:12px;background:var(--surface2)}
+.summary-overview>div+div{padding-left:16px;border-left:1px solid var(--border2)}
+.summary-overview-value{font-size:18px;font-weight:600;line-height:1.25;font-variant-numeric:tabular-nums}
+.summary-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin-top:16px}
+.summary-tile{min-width:0;min-height:80px;padding:12px 14px;border:1px solid var(--border2);border-radius:12px;background:var(--surface2)}
+.summary-tile-value{margin-top:7px;font-size:18px;font-weight:600;line-height:1.2;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.summary-green{color:var(--green)}
+.summary-progress{display:block;width:100%;height:7px;margin-top:10px;border:0;border-radius:999px;overflow:hidden;background:var(--border2);accent-color:var(--green)}
+.summary-progress::-webkit-progress-bar{background:var(--border2);border-radius:999px}
+.summary-progress::-webkit-progress-value{background:var(--green);border-radius:999px}
+.summary-progress::-moz-progress-bar{background:var(--green);border-radius:999px}
+.summary-note{margin-top:10px;font-size:11px}
 @media (max-width:1180px){.summary-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media (max-width:760px){.summary-panel{padding:18px}.summary-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.summary-overview{width:100%;justify-content:space-between}}
-@media (max-width:390px){.summary-grid{grid-template-columns:1fr}.summary-overview{gap:12px;padding:12px}.summary-overview>div+div{padding-left:12px}}
+@media (max-width:390px){.summary-overview{gap:12px;padding:12px}.summary-overview>div+div{padding-left:12px}}
 .metric-section{margin-bottom:26px}
 .metric-heading{font-size:13px;font-weight:600;color:var(--text2);margin:0 0 10px 2px}
 .cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}
@@ -477,19 +478,38 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
   </div>
   </div>
   <div class="metric-section">
+    <div class="metric-heading" id="periodHeading">按日期统计</div>
+    <div class="flex flex-wrap gap-8 mb-12" role="group" aria-labelledby="periodHeading" id="statsRangeChoices">
+      <button type="button" class="px-16 py-8 rounded-full border-subtle border-transparent bg-accent text-white font-inherit font-medium cursor-pointer focus-ring hover-accent" data-range="today" aria-pressed="true">今天</button>
+      <button type="button" class="px-16 py-8 rounded-full border-subtle bg-surface text-muted font-inherit font-medium cursor-pointer focus-ring hover-accent" data-range="1d" aria-pressed="false" title="最近 24 小时">1d</button>
+      <button type="button" class="px-16 py-8 rounded-full border-subtle bg-surface text-muted font-inherit font-medium cursor-pointer focus-ring hover-accent" data-range="7d" aria-pressed="false">7d</button>
+      <button type="button" class="px-16 py-8 rounded-full border-subtle bg-surface text-muted font-inherit font-medium cursor-pointer focus-ring hover-accent" data-range="14d" aria-pressed="false">14d</button>
+      <button type="button" class="px-16 py-8 rounded-full border-subtle bg-surface text-muted font-inherit font-medium cursor-pointer focus-ring hover-accent" data-range="30d" aria-pressed="false">30d</button>
+      <button type="button" class="px-16 py-8 rounded-full border-subtle bg-surface text-muted font-inherit font-medium cursor-pointer focus-ring hover-accent" data-range="all" aria-pressed="false" title="全部已保留日志">全部</button>
+    </div>
+    <div class="flex flex-wrap gap-12">
+      <label for="statsRefreshInterval" class="text-muted">自动刷新</label>
+      <select id="statsRefreshInterval" class="w-auto px-16 py-8 rounded-full border-subtle bg-surface font-inherit cursor-pointer focus-ring">
+        <option value="5000">5s</option>
+        <option value="10000" selected>10s</option>
+        <option value="30000">30s</option>
+      </select>
+    </div>
+  </div>
+  <div class="metric-section">
     <div class="metric-heading">Token 用量</div>
     <div class="cards tokens">
     <div class="card blue">
       <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg></div>
-      <div class="num" id="statPromptTokens">-</div><div class="label">累计输入 Token</div>
+      <div class="num" id="statPromptTokens">-</div><div class="label">输入 Token</div>
     </div>
     <div class="card green">
       <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg></div>
-      <div class="num" id="statCompletionTokens">-</div><div class="label">累计输出 Token</div>
+      <div class="num" id="statCompletionTokens">-</div><div class="label">输出 Token</div>
     </div>
     <div class="card yellow">
       <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg></div>
-      <div class="num" id="statTotalTokens">-</div><div class="label">累计总 Token</div>
+      <div class="num" id="statTotalTokens">-</div><div class="label">总 Token</div>
     </div>
     <div class="card blue">
       <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a10 10 0 1 0 10 10"/><path d="M12 6v6l4 2"/></svg></div>
@@ -502,12 +522,12 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
       <div class="summary-main">
         <span class="summary-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m13 2-9 12h7l-1 8 10-12h-7l1-8z"/></svg></span>
         <div>
-          <div class="summary-label summary-muted" id="summaryTitle">账号池累计 · 已处理 Token</div>
+          <div class="summary-label summary-muted" id="summaryTitle">所选时段 · 已处理 Token</div>
           <div class="summary-number-line"><strong class="summary-number" id="summaryProcessedTokens">-</strong><span class="summary-approx summary-muted" id="summaryProcessedApprox">-</span></div>
         </div>
       </div>
       <div class="summary-overview">
-        <div><div class="summary-label summary-muted">累计请求</div><div class="summary-overview-value" id="summaryRequests">-</div></div>
+        <div><div class="summary-label summary-muted">请求数</div><div class="summary-overview-value" id="summaryRequests">-</div></div>
         <div><div class="summary-label summary-muted">总费用</div><div class="summary-overview-value summary-muted" title="暂无费用统计">—</div></div>
       </div>
     </div>
@@ -521,25 +541,9 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
     <p class="summary-note summary-muted">费用与缓存创建尚未采集，显示为 —</p>
   </section>
   <div class="metric-section">
-    <div class="metric-heading" id="periodHeading">按日期统计</div>
-    <div class="flex flex-wrap gap-8 mb-12" role="group" aria-labelledby="periodHeading" id="statsRangeChoices">
-      <button type="button" class="px-16 py-8 rounded-full border-subtle border-transparent bg-accent text-white font-inherit font-medium cursor-pointer focus-ring hover-accent" data-range="today" aria-pressed="true">今天</button>
-      <button type="button" class="px-16 py-8 rounded-full border-subtle bg-surface text-muted font-inherit font-medium cursor-pointer focus-ring hover-accent" data-range="1d" aria-pressed="false" title="最近 24 小时">1d</button>
-      <button type="button" class="px-16 py-8 rounded-full border-subtle bg-surface text-muted font-inherit font-medium cursor-pointer focus-ring hover-accent" data-range="7d" aria-pressed="false">7d</button>
-      <button type="button" class="px-16 py-8 rounded-full border-subtle bg-surface text-muted font-inherit font-medium cursor-pointer focus-ring hover-accent" data-range="14d" aria-pressed="false">14d</button>
-      <button type="button" class="px-16 py-8 rounded-full border-subtle bg-surface text-muted font-inherit font-medium cursor-pointer focus-ring hover-accent" data-range="30d" aria-pressed="false">30d</button>
-    </div>
-    <div class="flex flex-wrap gap-12 mb-20">
-      <label for="statsRefreshInterval" class="text-muted">自动刷新</label>
-      <select id="statsRefreshInterval" class="px-16 py-8 rounded-full border-subtle bg-surface font-inherit cursor-pointer focus-ring">
-        <option value="5000">5s</option>
-        <option value="10000" selected>10s</option>
-        <option value="30000">30s</option>
-      </select>
-    </div>
     <div class="section">
       <div class="section-title">每日明细</div>
-      <div class="section-desc">基于最近 30 天保留的请求日志，最多 5000 条</div>
+      <div class="section-desc">全部仅包含已保留的请求日志（最近 30 天，最多 5000 条）</div>
       <div class="overflow-x-auto">
         <table class="min-w-680">
           <caption class="visually-hidden">每日明细</caption>
@@ -1248,8 +1252,8 @@ const I18N = {
   '关于': 'About',
   '反馈': 'Feedback',
   '查看账号池状态与快捷操作': 'Pool status & quick actions',
-  '账号池累计 · 已处理 Token': 'Account Pool · Tokens Processed',
-  '累计请求': 'Total Requests',
+  '所选时段 · 已处理 Token': 'Selected Period · Tokens Processed',
+  '请求数': 'Requests',
   '总费用': 'Total Cost',
   '暂无费用统计': 'Cost data is not available',
   '未缓存输入': 'Fresh Input',
@@ -1257,6 +1261,8 @@ const I18N = {
   '暂无缓存创建统计': 'Cache creation data is not available',
   '缓存命中': 'Cache Hit',
   '缓存命中率': 'Cache Hit Rate',
+  '全部': 'All',
+  '全部已保留日志': 'All retained request logs',
   '费用与缓存创建尚未采集，显示为 —': 'Cost and cache creation are not tracked yet; shown as —',
   '账号状态': 'Account Status',
   '账号总数': 'Total Accounts',
@@ -1272,7 +1278,7 @@ const I18N = {
   '输出 Token': 'Output Tokens',
   '每日明细': 'Daily Breakdown',
   '合计': 'Period Total',
-  '基于最近 30 天保留的请求日志，最多 5000 条': 'Based on retained request logs from the last 30 days, up to 5,000 entries',
+  '全部仅包含已保留的请求日志（最近 30 天，最多 5000 条）': 'All includes retained request logs only (last 30 days, up to 5,000 entries)',
   '日期': 'Date',
   '累计输入 Token': 'Total Input Tokens',
   '累计输出 Token': 'Total Output Tokens',
@@ -1825,7 +1831,7 @@ async function openExternal(url) {
 }
 
 // ========== 仪表盘 ==========
-const STATS_RANGES = ['today', '1d', '7d', '14d', '30d'];
+const STATS_RANGES = ['today', '1d', '7d', '14d', '30d', 'all'];
 const STATS_REFRESH_INTERVALS = [5000, 10000, 30000];
 let _statsRange = 'today';
 let _statsRefreshMs = 10000;
@@ -1870,24 +1876,24 @@ async function loadStats() {
     _('statActive').textContent = s.active;
     _('statCooldown').textContent = s.cooldown;
     _('statExpired').textContent = s.expired;
-    _('statPromptTokens').textContent = formatTokenCount(s.promptTokens);
-    _('statCompletionTokens').textContent = formatTokenCount(s.completionTokens);
-    _('statTotalTokens').textContent = formatTokenCount(s.totalTokens);
-    _('statCachedTokens').textContent = formatTokenCount(s.cachedTokens);
-    const processed = Math.max(0, Number(s.totalTokens) || 0);
-    const input = Math.max(0, Number(s.promptTokens) || 0);
-    const cached = Math.max(0, Number(s.cachedTokens) || 0);
+    const usage = s.periodUsage || {};
+    const summary = usage.summary || {};
+    _('statPromptTokens').textContent = formatTokenCount(summary.inputTokens);
+    _('statCompletionTokens').textContent = formatTokenCount(summary.outputTokens);
+    _('statTotalTokens').textContent = formatTokenCount(summary.totalTokens);
+    _('statCachedTokens').textContent = formatTokenCount(summary.cachedTokens);
+    const processed = Math.max(0, Number(summary.totalTokens) || 0);
+    const input = Math.max(0, Number(summary.inputTokens) || 0);
+    const cached = Math.max(0, Number(summary.cachedTokens) || 0);
     const hitRate = input > 0 ? Math.min(100, cached / input * 100) : 0;
     _('summaryProcessedTokens').textContent = formatNumber(processed);
     _('summaryProcessedApprox').textContent = '≈ ' + formatTokenCount(processed);
-    _('summaryRequests').textContent = formatNumber(s.usageCount);
+    _('summaryRequests').textContent = formatNumber(summary.requests);
     _('summaryFreshInput').textContent = formatTokenCount(Math.max(0, input - cached));
-    _('summaryOutput').textContent = formatTokenCount(s.completionTokens);
+    _('summaryOutput').textContent = formatTokenCount(summary.outputTokens);
     _('summaryCacheHit').textContent = formatTokenCount(cached);
     _('summaryCacheRate').textContent = hitRate.toFixed(1) + '%';
     _('summaryCacheProgress').value = hitRate;
-    const usage = s.periodUsage || {};
-    const summary = usage.summary || {};
     _('statsPeriodRequests').textContent = formatNumber(summary.requests);
     _('statsPeriodInputTokens').textContent = formatTokenCount(summary.inputTokens);
     _('statsPeriodOutputTokens').textContent = formatTokenCount(summary.outputTokens);
@@ -3208,7 +3214,8 @@ document.querySelectorAll('#statsRangeChoices button').forEach(button => {
     _statsRange = button.dataset.range;
     try { localStorage.setItem('cline_dashboard_range', _statsRange); } catch (e) {}
     syncStatsRangeButtons();
-    ['statsPeriodRequests', 'statsPeriodInputTokens', 'statsPeriodOutputTokens', 'statsPeriodCachedTokens', 'statsPeriodTotalTokens'].forEach(id => _(id).textContent = '-');
+    ['statPromptTokens', 'statCompletionTokens', 'statTotalTokens', 'statCachedTokens', 'summaryProcessedTokens', 'summaryProcessedApprox', 'summaryRequests', 'summaryFreshInput', 'summaryOutput', 'summaryCacheHit', 'summaryCacheRate', 'statsPeriodRequests', 'statsPeriodInputTokens', 'statsPeriodOutputTokens', 'statsPeriodCachedTokens', 'statsPeriodTotalTokens'].forEach(id => _(id).textContent = '-');
+    _('summaryCacheProgress').value = 0;
     _('statsDailyBody').innerHTML = '<tr><td colspan="6" class="empty">' + t('加载中…') + '</td></tr>';
     loadStats();
   });

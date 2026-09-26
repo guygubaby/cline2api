@@ -15,6 +15,7 @@ func TestSummarizeRequestUsageByViewerDate(t *testing.T) {
 		{StartedAt: now.Add(-10 * time.Hour), InputTokens: 20, OutputTokens: 7, TotalTokens: 27},
 		{StartedAt: now.Add(-25 * time.Hour), InputTokens: 30, TotalTokens: 30},
 		{StartedAt: now.Add(-8 * 24 * time.Hour), InputTokens: 40, TotalTokens: 40},
+		{StartedAt: now.Add(-31 * 24 * time.Hour), InputTokens: 50, TotalTokens: 50},
 	}
 	requestLogsMu.Unlock()
 	t.Cleanup(func() {
@@ -34,6 +35,10 @@ func TestSummarizeRequestUsageByViewerDate(t *testing.T) {
 	week := summarizeRequestUsage(now, "7d", -480)
 	if week.Summary.Requests != 3 || len(week.Days) != 7 || week.Days[6].Date != "2026-09-18" {
 		t.Fatalf("seven calendar days usage = %+v", week)
+	}
+	all := summarizeRequestUsage(now, "all", -480)
+	if all.Summary.Requests != 4 || all.Summary.TotalTokens != 112 || len(all.Days) != 9 || all.Days[8].Date != "2026-09-16" {
+		t.Fatalf("all retained usage = %+v", all)
 	}
 	encoded, err := json.Marshal(week.Days[0])
 	if err != nil || string(encoded) != `{"date":"2026-09-24","requests":1,"inputTokens":10,"outputTokens":5,"cachedTokens":2,"totalTokens":15}` {

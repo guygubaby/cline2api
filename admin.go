@@ -1703,7 +1703,7 @@ func handleAdminStats(w http.ResponseWriter, r *http.Request) {
 		period = "today"
 	}
 	switch period {
-	case "today", "1d", "7d", "14d", "30d":
+	case "today", "1d", "7d", "14d", "30d", "all":
 	default:
 		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "invalid stats range"})
 		return
