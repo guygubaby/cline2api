@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -148,6 +149,45 @@ func addAccount(acc *Account) {
 	p.Accounts = append(p.Accounts, acc)
 	poolMu.Unlock()
 	savePool()
+}
+
+func findAccountByRefreshToken(refreshToken string) *Account {
+	refreshToken = strings.TrimSpace(refreshToken)
+	if refreshToken == "" {
+		return nil
+	}
+	p := loadPool()
+	poolMu.Lock()
+	defer poolMu.Unlock()
+	for _, account := range p.Accounts {
+		if strings.TrimSpace(account.RefreshToken) == refreshToken {
+			return account
+		}
+	}
+	return nil
+}
+
+// addAccountIfUnique performs the final duplicate check and append under one
+// lock so concurrent imports cannot create duplicate refresh-token entries.
+func addAccountIfUnique(account *Account) (*Account, bool) {
+	if account == nil {
+		return nil, false
+	}
+	account.RefreshToken = strings.TrimSpace(account.RefreshToken)
+	p := loadPool()
+	poolMu.Lock()
+	if account.RefreshToken != "" {
+		for _, existing := range p.Accounts {
+			if strings.TrimSpace(existing.RefreshToken) == account.RefreshToken {
+				poolMu.Unlock()
+				return existing, false
+			}
+		}
+	}
+	p.Accounts = append(p.Accounts, account)
+	poolMu.Unlock()
+	savePool()
+	return account, true
 }
 
 func removeAccount(accountID string) bool {

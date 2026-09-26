@@ -117,7 +117,7 @@ Responses streaming maps upstream `reasoning_content` to standard reasoning item
 
 Chat Completions exposes only standard OpenAI fields; upstream-only `reasoning_content`, billing fields, and provider metadata are removed. Clients that need streamed reasoning should use Responses. With `stream_options: {"include_usage": true}`, ordinary chunks carry `usage: null` and a final `choices: []` usage chunk is emitted immediately before `[DONE]`. Chat and Responses share a 30-second first-event timeout, short model-level account cooldown, and at most one alternate-account retry.
 
-You may also request the virtual `free` model. It tries `z-ai/glm-5.3-flash`, `deepseek/deepseek-v4-flash`, then `cline-free/longcat-2.0`. Each model is limited to two non-cooling accounts, for at most six upstream initializations per request, preventing unbounded retries during a free-pool outage. Request logs store the effective model.
+You may also request the virtual `free` model. After a successful catalog sync, the proxy uses only free models that the upstream still advertises, prioritizing `z-ai/glm-5.3-flash`, `deepseek/deepseek-v4-flash`, and `cline-free/longcat-2.0`, then appending newly advertised free models in upstream order. Offline mode falls back to the three built-in models. Each model is limited to two non-cooling accounts, preventing unbounded retries during a free-pool outage. Request logs store the effective model.
 
 Multi-user isolation: every Cline upstream attempt gets an independent 128-bit cryptographically random session ID, used consistently for both `X-Task-ID` and body `session_id`; a 401 replay keeps the same ID, while a new attempt never reuses it. Zen compaction state, client cache keys, and user identifiers are namespaced by a non-reversible tenant digest of the downstream API key; cross-request shared state is disabled when no API key is configured. Audit logs contain only random request/task IDs and per-process-keyed HMAC-SHA256 values, never prompt or response text. Give each person/application a distinct API key. The account pool remains global to an instance, so sensitive multi-tenant deployments should also use separate instances/account pools.
 
@@ -231,11 +231,12 @@ Files are looked up in this order: executable directory → working directory �
 | `.cline-zen.json` | OpenCode Zen, proxy, and compaction settings |
 | `.cline-providers.json` | Custom providers, API keys, and model mappings |
 | `.cline-config.json` | Proxy rotation strategy and upstream request headers |
+| `.cline-proxy.json` | Cline/WorkOS egress proxy pool and selection strategy |
 | `override.md` | System Prompt override (optional) |
 
 > ⚠️ The account file contains refreshTokens and the custom-provider file contains API keys. Treat both as sensitive; never ship or commit them.
 
-Docker Compose keeps the existing state files as bind mounts and stores custom-provider and proxy configuration in automatically created `provider-data` and `config-data` named volumes. Before the first deployment, only the bind-mounted files need to exist:
+Docker Compose keeps the existing state files as bind mounts and stores custom-provider, general, and Cline egress-proxy configuration in automatically created `provider-data` and `config-data` named volumes. Before the first deployment, only the bind-mounted files need to exist:
 
 ```bash
 touch .cline-accounts.json .cline-request-logs.json .cline-zen.json override.md
@@ -256,6 +257,8 @@ docker compose up -d --build
 Use `CLINE_ALLOW_INSECURE_ADMIN=true` only as an explicit temporary override on an isolated trusted network.
 
 The application prefers atomic temp-file replacement. If Docker rejects `rename` over a file bind mount, it automatically falls back to a synced direct write so accounts, API keys, Zen settings, and request logs survive restarts.
+
+The admin panel can configure a separate Cline egress proxy pool. It applies only to `*.cline.bot` and `*.workos.com`, so custom-provider traffic is not accidentally routed through it, and proxy passwords are never returned to the browser. Docker stores this configuration in the `config-data` volume.
 
 ## Available Models
 

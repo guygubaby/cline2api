@@ -98,8 +98,11 @@ func registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/api/opencode/config", auth(handleOpenCodeConfig))
 	mux.HandleFunc("/admin/api/opencode/config/update", auth(handleOpenCodeConfigUpdate))
 	mux.HandleFunc("/admin/api/opencode/models/sync", auth(handleOpenCodeModelSync))
+	mux.HandleFunc("/admin/api/cline-proxy/config", auth(handleClineProxyConfig))
+	mux.HandleFunc("/admin/api/cline-proxy/config/update", auth(handleClineProxyConfigUpdate))
 	mux.HandleFunc("/admin/api/models/add", auth(handleAdminModelAdd))
 	mux.HandleFunc("/admin/api/models/delete", auth(handleAdminModelDelete))
+	mux.HandleFunc("/admin/api/models/context", auth(handleAdminModelContext))
 	mux.HandleFunc("/admin/api/providers", auth(handleAdminProviders))
 	mux.HandleFunc("/admin/api/providers/save", auth(handleAdminProviderSave))
 	mux.HandleFunc("/admin/api/providers/delete", auth(handleAdminProviderDelete))
@@ -428,8 +431,17 @@ func handleAdminAccountAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	req.RefreshToken = strings.TrimSpace(req.RefreshToken)
 	if req.RefreshToken == "" {
 		writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "refresh_token_required")})
+		return
+	}
+	if existing := findAccountByRefreshToken(req.RefreshToken); existing != nil {
+		writeAPI(w, http.StatusOK, apiResponse{
+			Success: true,
+			Message: tAPI(r, "account_exists", existing.Email),
+			Data:    map[string]any{"accountId": existing.AccountID, "email": existing.Email, "status": existing.Status, "duplicate": true},
+		})
 		return
 	}
 
@@ -457,7 +469,15 @@ func handleAdminAccountAdd(w http.ResponseWriter, r *http.Request) {
 		acc.RefreshToken = resp.Data.RefreshToken
 	}
 
-	addAccount(acc)
+	stored, added := addAccountIfUnique(acc)
+	if !added {
+		writeAPI(w, http.StatusOK, apiResponse{
+			Success: true,
+			Message: tAPI(r, "account_exists", stored.Email),
+			Data:    map[string]any{"accountId": stored.AccountID, "email": stored.Email, "status": stored.Status, "duplicate": true},
+		})
+		return
+	}
 	log.Printf("Account added via API: %s", req.Email)
 
 	writeAPI(w, http.StatusOK, apiResponse{
@@ -665,7 +685,9 @@ func handleSSOImport(w http.ResponseWriter, r *http.Request) {
 	// SSO cookie format expected: workos_session=xxx or similar
 	lines := strings.Split(req.SSOCookies, "\n")
 	imported := 0
+	duplicates := 0
 	errors := []string{}
+	seen := make(map[string]struct{})
 
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
@@ -674,7 +696,19 @@ func handleSSOImport(w http.ResponseWriter, r *http.Request) {
 		}
 		// Try to use the cookie as a refresh token directly (common format)
 		if strings.HasPrefix(line, "workos:") || len(line) > 20 {
-			token := strings.TrimPrefix(line, "workos:")
+			token := strings.TrimSpace(strings.TrimPrefix(line, "workos:"))
+			if token == "" {
+				continue
+			}
+			if _, exists := seen[token]; exists {
+				duplicates++
+				continue
+			}
+			seen[token] = struct{}{}
+			if findAccountByRefreshToken(token) != nil {
+				duplicates++
+				continue
+			}
 			resp, err := refreshClineToken(token)
 			if err != nil {
 				errors = append(errors, fmt.Sprintf("token %s...: %v", truncate(token, 16), err))
@@ -694,14 +728,21 @@ func handleSSOImport(w http.ResponseWriter, r *http.Request) {
 				Status:       "active",
 				CreatedAt:    time.Now(),
 			}
-			addAccount(acc)
-			imported++
+			if resp.Data.RefreshToken != "" {
+				acc.RefreshToken = resp.Data.RefreshToken
+			}
+			if _, added := addAccountIfUnique(acc); added {
+				imported++
+			} else {
+				duplicates++
+			}
 		}
 	}
 
 	result := map[string]any{
-		"imported": imported,
-		"failed":   len(errors),
+		"imported":   imported,
+		"failed":     len(errors),
+		"duplicates": duplicates,
 	}
 	if len(errors) > 0 {
 		result["errors"] = errors
@@ -709,7 +750,7 @@ func handleSSOImport(w http.ResponseWriter, r *http.Request) {
 
 	writeAPI(w, http.StatusOK, apiResponse{
 		Success: true,
-		Message: tAPI(r, "imported_accounts", imported, len(errors)),
+		Message: tAPI(r, "imported_accounts", imported, len(errors), duplicates),
 		Data:    result,
 	})
 }
@@ -744,13 +785,25 @@ func handleBatchImport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	imported := 0
+	duplicates := 0
 	errors := []string{}
+	seen := make(map[string]struct{})
 
 	for _, t := range req.Tokens {
-		if t.RefreshToken == "" {
+		token := strings.TrimSpace(t.RefreshToken)
+		if token == "" {
 			continue
 		}
-		resp, err := refreshClineToken(t.RefreshToken)
+		if _, exists := seen[token]; exists {
+			duplicates++
+			continue
+		}
+		seen[token] = struct{}{}
+		if findAccountByRefreshToken(token) != nil {
+			duplicates++
+			continue
+		}
+		resp, err := refreshClineToken(token)
 		if err != nil {
 			errors = append(errors, fmt.Sprintf("%s: %v", t.Email, err))
 			continue
@@ -762,23 +815,30 @@ func handleBatchImport(w http.ResponseWriter, r *http.Request) {
 		acc := &Account{
 			AccountID:    fmt.Sprintf("acc_%d", time.Now().UnixMilli()),
 			Email:        email,
-			RefreshToken: t.RefreshToken,
+			RefreshToken: token,
 			AccessToken:  "workos:" + resp.Data.AccessToken,
 			ExpiresAt:    parseExpiry(resp.Data.ExpiresAt) - 60000,
 			Status:       "active",
 			CreatedAt:    time.Now(),
 		}
-		addAccount(acc)
-		imported++
+		if resp.Data.RefreshToken != "" {
+			acc.RefreshToken = resp.Data.RefreshToken
+		}
+		if _, added := addAccountIfUnique(acc); added {
+			imported++
+		} else {
+			duplicates++
+		}
 	}
 
 	writeAPI(w, http.StatusOK, apiResponse{
 		Success: true,
-		Message: tAPI(r, "imported_accounts", imported, len(errors)),
+		Message: tAPI(r, "imported_accounts", imported, len(errors), duplicates),
 		Data: map[string]any{
-			"imported": imported,
-			"failed":   len(errors),
-			"errors":   errors,
+			"imported":   imported,
+			"failed":     len(errors),
+			"duplicates": duplicates,
+			"errors":     errors,
 		},
 	})
 }
@@ -1474,6 +1534,54 @@ func handleAdminModelDelete(w http.ResponseWriter, r *http.Request) {
 	writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: tAPI(r, "model_deleted")})
 }
 
+// POST /admin/api/models/context body: {id, context, output}. Setting both
+// limits to zero unlocks the model so the next upstream sync may populate them.
+func handleAdminModelContext(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
+		return
+	}
+	var request struct {
+		ID      string `json:"id"`
+		Context int    `json:"context"`
+		Output  int    `json:"output"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_json")})
+		return
+	}
+	request.ID = strings.TrimSpace(request.ID)
+	if request.ID == "" {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "model_id_required")})
+		return
+	}
+	if request.Context < 0 || request.Output < 0 || (request.Context > 0 && request.Output > request.Context) {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_model_limits")})
+		return
+	}
+	p := loadPool()
+	poolMu.Lock()
+	found := false
+	for index := range p.Models {
+		if p.Models[index].ID != request.ID {
+			continue
+		}
+		p.Models[index].Context = request.Context
+		p.Models[index].Output = request.Output
+		p.Models[index].MetaLocked = request.Context != 0 || request.Output != 0
+		found = true
+		break
+	}
+	poolMu.Unlock()
+	if !found {
+		writeAPI(w, http.StatusNotFound, apiResponse{Error: tAPI(r, "model_not_found")})
+		return
+	}
+	savePool()
+	log.Printf("model limits updated: model=%s context=%d output=%d", request.ID, request.Context, request.Output)
+	writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: tAPI(r, "model_context_saved")})
+}
+
 // GET /admin/api/providers
 func handleAdminProviders(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -1839,4 +1947,67 @@ func handleOpenCodeModelSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeAPI(w, http.StatusOK, apiResponse{Success: true, Data: res, Message: tAPI(r, "model_sync_done")})
+}
+
+// GET /admin/api/cline-proxy/config returns display-safe state only. Raw proxy
+// credentials never round-trip through the browser.
+func handleClineProxyConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
+		return
+	}
+	config := getClineProxyConfig()
+	masked := make([]string, 0, len(config.Proxies))
+	for _, proxyURL := range config.Proxies {
+		masked = append(masked, maskClineProxyForDisplay(proxyURL))
+	}
+	writeAPI(w, http.StatusOK, apiResponse{Success: true, Data: map[string]any{
+		"proxyStrategy":     config.ProxyStrategy,
+		"proxyCount":        len(config.Proxies),
+		"configuredProxies": masked,
+	}})
+}
+
+// POST /admin/api/cline-proxy/config/update updates the strategy and optionally
+// replaces or clears the secret proxy list. Omitting proxies keeps it unchanged.
+func handleClineProxyConfigUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
+		return
+	}
+	var request struct {
+		Proxies       *[]string `json:"proxies"`
+		ProxyStrategy *string   `json:"proxyStrategy"`
+		ClearProxies  bool      `json:"clearProxies"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_json")})
+		return
+	}
+	config := getClineProxyConfig()
+	if request.ProxyStrategy != nil {
+		switch *request.ProxyStrategy {
+		case "round_robin", "random", "fill":
+			config.ProxyStrategy = *request.ProxyStrategy
+		default:
+			writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_proxy_strategy")})
+			return
+		}
+	}
+	if request.ClearProxies {
+		config.Proxies = []string{}
+	} else if request.Proxies != nil {
+		config.Proxies = append([]string(nil), (*request.Proxies)...)
+	}
+	normalizeClineProxyConfig(config)
+	if err := validateProxyList(config.Proxies); err != nil {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
+		return
+	}
+	if err := setClineProxyConfig(config); err != nil {
+		writeAPI(w, http.StatusInternalServerError, apiResponse{Error: err.Error()})
+		return
+	}
+	log.Printf("admin: cline egress proxy config updated (%d proxies, %s)", len(config.Proxies), config.ProxyStrategy)
+	writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: tAPI(r, "cline_proxy_saved")})
 }

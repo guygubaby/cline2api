@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"os/exec"
@@ -25,12 +24,12 @@ var errRequestBodyTooLarge = errors.New("request body too large")
 var execCommand = exec.Command
 
 var httpTransport = &http.Transport{
-	Proxy:                 http.ProxyFromEnvironment,
+	Proxy:                 clineOutboundProxy,
 	MaxIdleConns:          100,
 	MaxIdleConnsPerHost:   10,
 	IdleConnTimeout:       90 * time.Second,
 	DisableCompression:    false,
-	DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+	DialContext:           clineDialContext,
 	TLSHandshakeTimeout:   10 * time.Second,
 	ResponseHeaderTimeout: inferenceResponseHeaderTimeout,
 	ExpectContinueTimeout: time.Second,

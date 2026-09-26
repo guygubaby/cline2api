@@ -86,6 +86,31 @@ button,a,summary{touch-action:manipulation}
 .focus-ring:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .hover-accent:hover{border-color:var(--accent);color:var(--accent)}
 .bg-accent.hover-accent:hover{color:#fff;background:var(--accent-hover)}
+.summary-panel{padding:24px;border:1px solid #34353b;border-radius:20px;background:#232429;color:#f7f8fa;margin-bottom:26px}
+.summary-top{display:flex;align-items:center;justify-content:space-between;gap:20px;flex-wrap:wrap}
+.summary-main{display:flex;align-items:center;gap:18px;min-width:0}
+.summary-icon{width:60px;height:60px;flex:none;display:grid;place-items:center;border-radius:18px;background:#243148;color:#248fff}
+.summary-icon svg{width:30px;height:30px}
+.summary-muted{color:#a6a8b2}
+.summary-label{font-size:13px;font-weight:600;letter-spacing:.03em}
+.summary-number-line{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+.summary-number{font-size:clamp(30px,3vw,46px);line-height:1.18;font-weight:700;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.summary-approx{padding:3px 10px;border-radius:999px;background:#292a30;font-size:13px;white-space:nowrap}
+.summary-overview{display:flex;align-items:center;gap:24px;padding:16px 22px;border:1px solid #34353b;border-radius:18px;background:#202126}
+.summary-overview>div+div{padding-left:24px;border-left:1px solid #34353b}
+.summary-overview-value{font-size:23px;font-weight:600;line-height:1.25;font-variant-numeric:tabular-nums}
+.summary-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin-top:20px}
+.summary-tile{min-width:0;min-height:104px;padding:17px 18px;border:1px solid #34353b;border-radius:17px;background:#202126}
+.summary-tile-value{margin-top:9px;font-size:22px;font-weight:600;line-height:1.2;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.summary-green{color:#12b981}
+.summary-progress{display:block;width:100%;height:9px;margin-top:14px;border:0;border-radius:999px;overflow:hidden;background:#393b42;accent-color:#12b981}
+.summary-progress::-webkit-progress-bar{background:#393b42;border-radius:999px}
+.summary-progress::-webkit-progress-value{background:#12b981;border-radius:999px}
+.summary-progress::-moz-progress-bar{background:#12b981;border-radius:999px}
+.summary-note{margin-top:12px;font-size:12px}
+@media (max-width:1180px){.summary-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media (max-width:760px){.summary-panel{padding:18px}.summary-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.summary-overview{width:100%;justify-content:space-between}}
+@media (max-width:390px){.summary-grid{grid-template-columns:1fr}.summary-overview{gap:12px;padding:12px}.summary-overview>div+div{padding-left:12px}}
 .metric-section{margin-bottom:26px}
 .metric-heading{font-size:13px;font-weight:600;color:var(--text2);margin:0 0 10px 2px}
 .cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}
@@ -199,6 +224,7 @@ input,textarea,select{width:100%;padding:10px 14px;background:var(--surface);bor
 :where(button,a,input,textarea,select,summary):focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 input:focus-visible,textarea:focus-visible,select:focus-visible{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
 input:disabled{background:var(--surface2);color:var(--text2)}
+input[type="checkbox"]{width:auto;accent-color:var(--accent)}
 textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cascadia Code','Consolas',monospace;font-size:12px;line-height:1.6}
 ::placeholder{color:var(--text3)}
 
@@ -471,6 +497,29 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
     </div>
     </div>
   </div>
+  <section class="summary-panel" aria-labelledby="summaryTitle">
+    <div class="summary-top">
+      <div class="summary-main">
+        <span class="summary-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m13 2-9 12h7l-1 8 10-12h-7l1-8z"/></svg></span>
+        <div>
+          <div class="summary-label summary-muted" id="summaryTitle">账号池累计 · 已处理 Token</div>
+          <div class="summary-number-line"><strong class="summary-number" id="summaryProcessedTokens">-</strong><span class="summary-approx summary-muted" id="summaryProcessedApprox">-</span></div>
+        </div>
+      </div>
+      <div class="summary-overview">
+        <div><div class="summary-label summary-muted">累计请求</div><div class="summary-overview-value" id="summaryRequests">-</div></div>
+        <div><div class="summary-label summary-muted">总费用</div><div class="summary-overview-value summary-muted" title="暂无费用统计">—</div></div>
+      </div>
+    </div>
+    <div class="summary-grid">
+      <div class="summary-tile"><div class="summary-label summary-muted"><span aria-hidden="true">↓</span> 未缓存输入</div><div class="summary-tile-value" id="summaryFreshInput">-</div></div>
+      <div class="summary-tile"><div class="summary-label summary-muted"><span aria-hidden="true">↑</span> 输出</div><div class="summary-tile-value" id="summaryOutput">-</div></div>
+      <div class="summary-tile"><div class="summary-label summary-muted">缓存创建</div><div class="summary-tile-value summary-muted" title="暂无缓存创建统计">—</div></div>
+      <div class="summary-tile"><div class="summary-label summary-muted">缓存命中</div><div class="summary-tile-value" id="summaryCacheHit">-</div></div>
+      <div class="summary-tile"><div class="summary-label summary-muted">缓存命中率</div><div class="summary-tile-value summary-green" id="summaryCacheRate">-</div><progress class="summary-progress" id="summaryCacheProgress" value="0" max="100" aria-label="缓存命中率"></progress></div>
+    </div>
+    <p class="summary-note summary-muted">费用与缓存创建尚未采集，显示为 —</p>
+  </section>
   <div class="metric-section">
     <div class="metric-heading" id="periodHeading">按日期统计</div>
     <div class="flex flex-wrap gap-8 mb-12" role="group" aria-labelledby="periodHeading" id="statsRangeChoices">
@@ -817,6 +866,31 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
     </div>
     <div class="section-body">
       <div id="modelsList" class="action-row">加载中…</div>
+	  <form id="modelMetaForm" method="post" action="/admin/api/models/context" onsubmit="saveModelMeta(event)" style="margin-top:14px">
+		<fieldset style="border:0;padding:0;margin:0">
+		  <legend style="font-weight:600;margin-bottom:8px">模型上下文与输出限制</legend>
+		  <div class="form-row">
+			<div class="field" style="flex:1.5">
+			  <label for="modelMetaId">模型</label>
+			  <select id="modelMetaId" name="modelId" onchange="loadSelectedModelMeta()"><option value="">加载中…</option></select>
+			</div>
+			<div class="field">
+			  <label for="modelMetaContext">上下文窗口（Token）</label>
+			  <input id="modelMetaContext" name="context" type="number" min="0" inputmode="numeric" aria-describedby="modelMetaHelp">
+			</div>
+			<div class="field">
+			  <label for="modelMetaOutput">最大输出（Token）</label>
+			  <input id="modelMetaOutput" name="output" type="number" min="0" inputmode="numeric" aria-describedby="modelMetaHelp">
+			</div>
+		  </div>
+		  <div id="modelMetaHelp" style="font-size:12px;color:var(--text3);margin-top:4px">手动保存后同步不会覆盖；两个值都设为 0 可恢复上游同步值。</div>
+		  <div class="form-actions" style="margin-top:10px">
+			<button class="btn btn-primary btn-sm" type="submit">保存模型限制</button>
+			<button class="btn btn-sm" type="button" onclick="clearModelMeta()">恢复上游值</button>
+		  </div>
+		  <div id="modelMetaResult" aria-live="polite" style="margin-top:8px"></div>
+		</fieldset>
+	  </form>
       <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
         <div class="field" style="flex:1;min-width:220px">
           <label for="newModelId">添加模型</label>
@@ -831,6 +905,44 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
         </div>
         <button class="btn btn-success" onclick="addModel()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>添加</button>
       </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>Cline 出口代理</div>
+    <div class="section-desc">仅代理发往 Cline 与 WorkOS 的对话、登录、Token 刷新和模型同步请求。代理凭据只保存在服务端，管理页不会回显原始密码。</div>
+    <div class="section-body">
+      <form id="clineProxyForm" method="post" action="/admin/api/cline-proxy/config/update" onsubmit="saveClineProxyConfig(event)">
+        <fieldset style="border:0;padding:0;margin:0">
+          <legend style="position:absolute;clip-path:inset(50%);width:1px;height:1px;overflow:hidden">Cline 出口代理设置</legend>
+          <div class="form-row">
+            <div class="field" style="max-width:260px">
+              <label for="clineProxyStrategy">代理策略</label>
+              <select id="clineProxyStrategy" name="proxyStrategy">
+                <option value="round_robin">轮询 (round_robin)</option>
+                <option value="random">随机 (random)</option>
+                <option value="fill">填满 (fill)</option>
+              </select>
+            </div>
+            <div class="field" style="flex:1">
+              <label>当前已配置代理</label>
+              <div id="clineProxyConfigured" class="mono" style="font-size:12px;color:var(--text3);overflow-wrap:anywhere">未配置</div>
+            </div>
+          </div>
+          <div class="field" style="margin-top:10px">
+            <label for="clineProxies">替换代理列表（留空保持现有配置）</label>
+            <textarea id="clineProxies" name="proxies" rows="4" autocomplete="off" aria-describedby="clineProxyHelp" style="width:100%;font-family:ui-monospace,monospace;font-size:12px;border:1px solid var(--border2);border-radius:8px;padding:8px;background:var(--surface);color:var(--text)" placeholder="socks5://127.0.0.1:1080&#10;http://user:pass@proxy.example.com:8080"></textarea>
+            <div id="clineProxyHelp" style="font-size:12px;color:var(--text3);margin-top:4px">支持 http、https、socks5、socks5h，每行一个。输入新列表才会替换原配置。</div>
+          </div>
+          <label for="clineProxyClear" style="display:inline-flex;align-items:center;gap:8px;margin-top:10px">
+            <input id="clineProxyClear" name="clearProxies" type="checkbox"> 清空现有代理列表
+          </label>
+          <div class="form-actions" style="margin-top:14px">
+            <button class="btn btn-primary" type="submit">保存 Cline 代理</button>
+          </div>
+          <div id="clineProxySaveResult" aria-live="polite" style="margin-top:8px"></div>
+        </fieldset>
+      </form>
     </div>
   </div>
 
@@ -1136,6 +1248,16 @@ const I18N = {
   '关于': 'About',
   '反馈': 'Feedback',
   '查看账号池状态与快捷操作': 'Pool status & quick actions',
+  '账号池累计 · 已处理 Token': 'Account Pool · Tokens Processed',
+  '累计请求': 'Total Requests',
+  '总费用': 'Total Cost',
+  '暂无费用统计': 'Cost data is not available',
+  '未缓存输入': 'Fresh Input',
+  '缓存创建': 'Cache Creation',
+  '暂无缓存创建统计': 'Cache creation data is not available',
+  '缓存命中': 'Cache Hit',
+  '缓存命中率': 'Cache Hit Rate',
+  '费用与缓存创建尚未采集，显示为 —': 'Cost and cache creation are not tracked yet; shown as —',
   '账号状态': 'Account Status',
   '账号总数': 'Total Accounts',
   '活跃': 'Active',
@@ -1433,6 +1555,14 @@ const I18N = {
   '移除模型': 'Removed models',
   '模型无变化': 'No model changes',
   '模型列表已更新': 'Model list updated',
+  '模型上下文与输出限制': 'Model Context and Output Limits',
+  '上下文窗口（Token）': 'Context window (tokens)',
+  '最大输出（Token）': 'Maximum output (tokens)',
+  '手动保存后同步不会覆盖；两个值都设为 0 可恢复上游同步值。': 'Manual values survive model sync; set both to 0 to restore upstream values.',
+  '保存模型限制': 'Save model limits',
+  '恢复上游值': 'Restore upstream values',
+  '暂无可编辑模型': 'No editable models',
+  '已保存': 'Saved',
   '同步中…': 'Syncing…',
   '同步失败: ': 'Sync failed: ',
   '不能为空': 'is required',
@@ -1474,6 +1604,15 @@ const I18N = {
   '保存 opencode 配置': 'Save opencode Config',
   'opencode 配置已保存': 'OpenCode config saved',
   'opencode 出口代理': 'OpenCode Egress Proxies',
+  'Cline 出口代理': 'Cline Egress Proxies',
+  '仅代理发往 Cline 与 WorkOS 的对话、登录、Token 刷新和模型同步请求。代理凭据只保存在服务端，管理页不会回显原始密码。': 'Only chat, login, token refresh, and model sync requests to Cline and WorkOS are proxied. Proxy credentials stay on the server and raw passwords are never returned to this page.',
+  '当前已配置代理': 'Configured proxies',
+  '替换代理列表（留空保持现有配置）': 'Replacement proxy list (leave blank to keep current)',
+  '输入新列表才会替换原配置。': 'The current configuration is replaced only when a new list is entered.',
+  '清空现有代理列表': 'Clear configured proxies',
+  '保存 Cline 代理': 'Save Cline proxies',
+  'Cline 出口代理配置已保存': 'Cline egress proxy config saved',
+  '未配置': 'Not configured',
   '发往 opencode 的请求可经代理池轮询出口；命中限流时冷却当前出口并自动跳过。支持 http / https / socks5 / socks5h，每行一个，如 ': 'Requests to opencode can egress through a rotating proxy pool; the current proxy is cooled down and skipped on rate limits. Supports http / https / socks5 / socks5h, one per line, e.g. ',
   '代理策略': 'Proxy strategy',
   '出口冷却状态': 'Egress cooldowns',
@@ -1588,7 +1727,7 @@ function loadTabData(name) {
   if (name === 'logs') return loadRequestLogs(true);
   if (name === 'model-visibility') return loadModelVisibility();
   if (name === 'providers') return loadCustomProviders();
-  if (name === 'settings') return loadModels().then(() => Promise.all([loadKeys(), loadConfig(), loadOcConfig()]));
+  if (name === 'settings') return loadModels().then(() => Promise.all([loadKeys(), loadConfig(), loadOcConfig(), loadClineProxyConfig()]));
   return Promise.resolve();
 }
 
@@ -1735,6 +1874,18 @@ async function loadStats() {
     _('statCompletionTokens').textContent = formatTokenCount(s.completionTokens);
     _('statTotalTokens').textContent = formatTokenCount(s.totalTokens);
     _('statCachedTokens').textContent = formatTokenCount(s.cachedTokens);
+    const processed = Math.max(0, Number(s.totalTokens) || 0);
+    const input = Math.max(0, Number(s.promptTokens) || 0);
+    const cached = Math.max(0, Number(s.cachedTokens) || 0);
+    const hitRate = input > 0 ? Math.min(100, cached / input * 100) : 0;
+    _('summaryProcessedTokens').textContent = formatNumber(processed);
+    _('summaryProcessedApprox').textContent = '≈ ' + formatTokenCount(processed);
+    _('summaryRequests').textContent = formatNumber(s.usageCount);
+    _('summaryFreshInput').textContent = formatTokenCount(Math.max(0, input - cached));
+    _('summaryOutput').textContent = formatTokenCount(s.completionTokens);
+    _('summaryCacheHit').textContent = formatTokenCount(cached);
+    _('summaryCacheRate').textContent = hitRate.toFixed(1) + '%';
+    _('summaryCacheProgress').value = hitRate;
     const usage = s.periodUsage || {};
     const summary = usage.summary || {};
     _('statsPeriodRequests').textContent = formatNumber(summary.requests);
@@ -2238,6 +2389,7 @@ async function saveHeaders() {
 
 // ========== 模型列表 ==========
 let _cachedModels = [];
+let _modelMetaModels = [];
 let _modelSyncSeen = false;
 let _modelGroupOpen = {}; // 模型分组展开状态（跨刷新保持，付费组默认折叠）
 
@@ -2295,6 +2447,13 @@ async function loadModels() {
     const models = d.data.models || [];
     _cachedModels = models;
     _('modelsList').innerHTML = renderModelGroups(models);
+	_modelMetaModels = models.filter(model => model.source === 'remote' || model.source === 'zen' || model.custom);
+	const previousMetaModel = _('modelMetaId').value;
+	_('modelMetaId').innerHTML = _modelMetaModels.length
+	  ? _modelMetaModels.map((model, index) => '<option value="' + index + '">' + esc(model.id) + '</option>').join('')
+	  : '<option value="">' + t('暂无可编辑模型') + '</option>';
+	if (previousMetaModel !== '' && Number(previousMetaModel) < _modelMetaModels.length) _('modelMetaId').value = previousMetaModel;
+	loadSelectedModelMeta();
     const ls = d.data.lastSync || {};
     if (_('modelSyncTime')) {
       _('modelSyncTime').textContent = ls.syncedAt ? new Date(ls.syncedAt).toLocaleString(LC()) : t('从未同步');
@@ -2305,6 +2464,42 @@ async function loadModels() {
       showModelSyncModal(ls);
     }
   } catch (e) { _('modelsList').textContent = t('加载失败'); }
+}
+
+function loadSelectedModelMeta() {
+  const index = Number(_('modelMetaId').value);
+  const model = _modelMetaModels[index];
+  _('modelMetaContext').value = model ? (model.context || 0) : '';
+  _('modelMetaOutput').value = model ? (model.output || 0) : '';
+  _('modelMetaContext').disabled = !model;
+  _('modelMetaOutput').disabled = !model;
+}
+
+async function saveModelMeta(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  if (!form.reportValidity()) return;
+  const model = _modelMetaModels[Number(_('modelMetaId').value)];
+  if (!model) return;
+  const context = Number(_('modelMetaContext').value || 0);
+  const output = Number(_('modelMetaOutput').value || 0);
+  const button = form.querySelector('button[type="submit"]');
+  button.disabled = true;
+  try {
+    const response = await api('POST', '/models/context', { id: model.id, context, output });
+    _('modelMetaResult').innerHTML = '<span style="color:var(--green)">✓ ' + esc(response.message || t('已保存')) + '</span>';
+    await loadModels();
+  } catch (e) {
+    _('modelMetaResult').innerHTML = '<span style="color:var(--red)">' + t('保存失败: ') + esc(e.message) + '</span>';
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function clearModelMeta() {
+  _('modelMetaContext').value = '0';
+  _('modelMetaOutput').value = '0';
+  _('modelMetaForm').requestSubmit();
 }
 
 // ========== /v1/models 展示列表 ==========
@@ -2734,6 +2929,40 @@ async function saveOcConfig() {
     await loadOcConfig();
   } catch (e) {
     toast(t('保存失败: ') + (e.message || ''), 'error');
+  }
+}
+
+async function loadClineProxyConfig() {
+  try {
+    const response = await api('GET', '/cline-proxy/config');
+    const config = response.data || {};
+    _('clineProxyStrategy').value = config.proxyStrategy || 'round_robin';
+    const proxies = config.configuredProxies || [];
+    _('clineProxyConfigured').textContent = proxies.length ? proxies.join(' · ') : t('未配置');
+    _('clineProxies').value = '';
+    _('clineProxyClear').checked = false;
+  } catch (e) {
+    _('clineProxyConfigured').textContent = t('加载失败') + ': ' + e.message;
+  }
+}
+
+async function saveClineProxyConfig(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector('button[type="submit"]');
+  const replacement = _('clineProxies').value.split('\n').map(value => value.trim()).filter(Boolean);
+  const payload = { proxyStrategy: _('clineProxyStrategy').value };
+  if (_('clineProxyClear').checked) payload.clearProxies = true;
+  else if (replacement.length) payload.proxies = replacement;
+  button.disabled = true;
+  try {
+    const response = await api('POST', '/cline-proxy/config/update', payload);
+    _('clineProxySaveResult').innerHTML = '<span style="color:var(--green)">✓ ' + esc(response.message || t('Cline 出口代理配置已保存')) + '</span>';
+    await loadClineProxyConfig();
+  } catch (e) {
+    _('clineProxySaveResult').innerHTML = '<span style="color:var(--red)">' + t('保存失败: ') + esc(e.message) + '</span>';
+  } finally {
+    button.disabled = false;
   }
 }
 

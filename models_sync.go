@@ -45,6 +45,18 @@ type modelSyncResult struct {
 	Error    string   `json:"error,omitempty"`
 }
 
+func preserveLockedModelMetadata(models []Model, previous map[string]Model) {
+	for index := range models {
+		old, exists := previous[models[index].ID]
+		if !exists || !old.MetaLocked {
+			continue
+		}
+		models[index].Context = old.Context
+		models[index].Output = old.Output
+		models[index].MetaLocked = true
+	}
+}
+
 var (
 	modelSyncMu   sync.Mutex
 	lastModelSync modelSyncResult
@@ -61,7 +73,7 @@ var (
 
 // fetchClineRecommendedModels 拉取并解析 Cline 官方推荐模型接口。
 func fetchClineRecommendedModels() (clineRecommendedResponse, error) {
-	client := &http.Client{Timeout: modelSyncTimeout}
+	client := &http.Client{Timeout: modelSyncTimeout, Transport: httpTransport}
 	resp, err := client.Get(clineRecommendedModelsURL)
 	if err != nil {
 		return clineRecommendedResponse{}, fmt.Errorf("fetch models: %w", err)
@@ -168,18 +180,19 @@ func syncClineModels() modelSyncResult {
 	// 与池中现有 remote 模型比较
 	p := loadPool()
 	poolMu.Lock()
-	oldRemote := make(map[string]bool)
+	oldRemote := make(map[string]Model)
 	var kept []Model
 	for _, m := range p.Models {
 		if m.Source == "remote" {
-			oldRemote[m.ID] = true
+			oldRemote[m.ID] = m
 			continue
 		}
 		kept = append(kept, m)
 	}
-	for _, m := range remote {
-		if !oldRemote[m.ID] {
-			res.Added = append(res.Added, m.ID)
+	preserveLockedModelMetadata(remote, oldRemote)
+	for index := range remote {
+		if _, exists := oldRemote[remote[index].ID]; !exists {
+			res.Added = append(res.Added, remote[index].ID)
 		}
 	}
 	for id := range oldRemote {

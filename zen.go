@@ -7,7 +7,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -38,6 +37,28 @@ const (
 )
 
 const zenModelSyncInterval = 10 * time.Minute
+
+const (
+	zenHeaderWatchdogTimeout = 60 * time.Second
+	zenMaxRetryWait          = 60 * time.Second
+	zenMaxProxyCooldown      = 30 * time.Minute
+)
+
+type cancelOnCloseBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+	once   sync.Once
+}
+
+func (body *cancelOnCloseBody) Close() error {
+	body.once.Do(body.cancel)
+	return body.ReadCloser.Close()
+}
+
+func withCancelOnClose(response *http.Response, cancel context.CancelFunc) *http.Response {
+	response.Body = &cancelOnCloseBody{ReadCloser: response.Body, cancel: cancel}
+	return response
+}
 
 // zenSeedModels 内置 zen 免费模型种子表（含别名），仅作为从未同步成功时的离线 fallback。
 // 与 builtinModels（Cline 侧）同一模式：同步成功后以远程列表为准。
@@ -683,8 +704,15 @@ func callZenAPI(params map[string]any, stream bool) (*http.Response, error) {
 	upstreamStream := stream || anonymous
 
 	for attempt := 0; ; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyJSON))
+		// Bound only the wait for response headers. Once headers arrive the timer
+		// is stopped, so long-running SSE bodies remain unlimited and continue to
+		// inherit downstream cancellation through ctx.
+		watchCtx, watchCancel := context.WithCancel(ctx)
+		watchdog := time.AfterFunc(zenHeaderWatchdogTimeout, watchCancel)
+		req, err := http.NewRequestWithContext(watchCtx, http.MethodPost, endpoint, bytes.NewReader(bodyJSON))
 		if err != nil {
+			watchdog.Stop()
+			watchCancel()
 			return nil, fmt.Errorf("create zen request: %w", err)
 		}
 		requestID := "msg" + zenIdentifier()
@@ -707,19 +735,17 @@ func callZenAPI(params map[string]any, stream bool) (*http.Response, error) {
 			bodyParamsModel(params), upstreamStream, stream, getMsgCount(params), describeZenProxy(), attempt+1, truncate(sessionID, 30))
 
 		resp, err := getZenHTTPClient().Do(req)
+		watchdog.Stop()
 		if err != nil {
-			var networkError net.Error
+			watchCancel()
 			if ctx.Err() != nil {
-				return nil, fmt.Errorf("zen request: %w", err)
+				return nil, fmt.Errorf("zen request: %w", ctx.Err())
 			}
-			if errors.As(err, &networkError) && networkError.Timeout() {
-				markZenFail()
-				return nil, zenNetworkError(err)
-			}
-			// 网络错误：先退避重试，耗尽后计入故障转移。
+			// Network and header-watchdog failures share the bounded retry path.
 			if attempt < retries {
-				log.Printf("  zen network error (%v), retry %d/%d after %v", err, attempt+1, retries, delay)
-				if err := waitForRetry(ctx, withRetryJitter(delay)); err != nil {
+				wait := cappedZenRetryDelay(delay)
+				log.Printf("  zen network error (%v), retry %d/%d after %v", err, attempt+1, retries, wait)
+				if err := waitForRetry(ctx, wait); err != nil {
 					return nil, err
 				}
 				delay *= 2
@@ -729,12 +755,14 @@ func callZenAPI(params map[string]any, stream bool) (*http.Response, error) {
 			return nil, zenNetworkError(err)
 		}
 		if resp.StatusCode == http.StatusOK {
+			resp = withCancelOnClose(resp, watchCancel)
 			if anonymous && !stream {
 				collapsed, collapseErr := collapseZenStreamResponse(resp, bodyParamsModel(params))
 				if collapseErr != nil {
 					if attempt < retries {
-						log.Printf("  zen stream collapse failed (%v), retry %d/%d after %v", collapseErr, attempt+1, retries, delay)
-						if waitErr := waitForRetry(ctx, withRetryJitter(delay)); waitErr != nil {
+						wait := cappedZenRetryDelay(delay)
+						log.Printf("  zen stream collapse failed (%v), retry %d/%d after %v", collapseErr, attempt+1, retries, wait)
+						if waitErr := waitForRetry(ctx, wait); waitErr != nil {
 							return nil, waitErr
 						}
 						delay *= 2
@@ -752,24 +780,34 @@ func callZenAPI(params map[string]any, stream bool) (*http.Response, error) {
 
 		bodyBytes := readAllLimited(resp.Body, 64<<10)
 		resp.Body.Close()
+		watchCancel()
 		reason := fmt.Sprintf("zen API %d: %s", resp.StatusCode, truncate(string(bodyBytes), 500))
 
 		if isRateLimited(resp.StatusCode, string(bodyBytes)) {
+			retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"))
 			// 冷却当前出口代理（Retry-After 优先，默认 10 分钟）
 			if idx := lastZenProxyIdx(); idx >= 0 {
-				d := parseRetryAfter(resp.Header.Get("Retry-After"))
+				d := retryAfter
 				if d <= 0 {
 					d = 10 * time.Minute
+				}
+				if d > zenMaxProxyCooldown {
+					d = zenMaxProxyCooldown
 				}
 				cooldownZenProxy(idx, d)
 			}
 			if attempt < retries {
 				wait := delay
-				if ra := parseRetryAfter(resp.Header.Get("Retry-After")); ra > wait {
-					wait = ra
+				if retryAfter > wait {
+					wait = retryAfter
 				}
+				if wait > zenMaxRetryWait {
+					markZenFail()
+					return nil, fmt.Errorf("%s (Retry-After %s exceeds the per-request retry limit)", reason, retryAfter.Truncate(time.Second))
+				}
+				wait = cappedZenRetryDelay(wait)
 				log.Printf("  zen rate limited (%d), retry %d/%d after %v", resp.StatusCode, attempt+1, retries, wait)
-				if err := waitForRetry(ctx, withRetryJitter(wait)); err != nil {
+				if err := waitForRetry(ctx, wait); err != nil {
 					return nil, err
 				}
 				delay *= 2
@@ -786,6 +824,20 @@ func callZenAPI(params map[string]any, stream bool) (*http.Response, error) {
 		}
 		return nil, fmt.Errorf("%s", reason)
 	}
+}
+
+func cappedZenRetryDelay(delay time.Duration) time.Duration {
+	if delay <= 0 {
+		delay = time.Second
+	}
+	if delay > zenMaxRetryWait {
+		delay = zenMaxRetryWait
+	}
+	delay = withRetryJitter(delay)
+	if delay > zenMaxRetryWait {
+		return zenMaxRetryWait
+	}
+	return delay
 }
 
 func waitForRetry(ctx context.Context, delay time.Duration) error {
@@ -963,7 +1015,8 @@ func syncZenModels() modelSyncResult {
 		return fail(fmt.Errorf("models API returned empty list"))
 	}
 
-	// 补全上下文信息：远程接口不带 context/output，优先沿用种子表/旧值
+	// 补全上下文信息：远程接口不带 context/output，先按种子表或
+	// 保守默认值填充；写入时再原子覆盖管理员锁定的 metadata。
 	fillMeta := func(m Model) Model {
 		for _, sm := range zenSeedModels {
 			if sm.ID == m.ID {
@@ -986,14 +1039,17 @@ func syncZenModels() modelSyncResult {
 	p := loadPool()
 	poolMu.Lock()
 	oldIDs := make(map[string]bool)
+	oldZen := make(map[string]Model)
 	var kept []Model
 	for _, m := range p.Models {
 		if m.Source == "zen" {
 			oldIDs[m.ID] = true
+			oldZen[m.ID] = m
 			continue
 		}
 		kept = append(kept, m)
 	}
+	preserveLockedModelMetadata(remote, oldZen)
 	for _, m := range remote {
 		if !oldIDs[m.ID] {
 			res.Added = append(res.Added, m.ID)

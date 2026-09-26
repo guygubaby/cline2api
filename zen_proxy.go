@@ -38,6 +38,8 @@ var (
 	zenProxyCooldownsMu sync.Mutex
 )
 
+const zenTLSHandshakeTimeout = 15 * time.Second
+
 func getZenHTTPClient() *http.Client {
 	zenTransportMu.Lock()
 	defer zenTransportMu.Unlock()
@@ -79,7 +81,9 @@ func zenHTTP2Transport() *http2.Transport {
 				ServerName: host,
 				NextProtos: []string{"h2", "http/1.1"},
 			}, utls.HelloChrome_120)
-			if err := uconn.HandshakeContext(ctx); err != nil {
+			handshakeCtx, cancel := context.WithTimeout(ctx, zenTLSHandshakeTimeout)
+			defer cancel()
+			if err := uconn.HandshakeContext(handshakeCtx); err != nil {
 				raw.Close()
 				return nil, err
 			}
@@ -236,14 +240,16 @@ func dialViaProxy(ctx context.Context, raw, network, addr string) (net.Conn, err
 
 // dialHTTPProxy 经 http(s) 代理建立 CONNECT 隧道。
 func dialHTTPProxy(ctx context.Context, u *url.URL, network, addr string) (net.Conn, error) {
-	d := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+	d := &net.Dialer{Timeout: 12 * time.Second, KeepAlive: 30 * time.Second}
 	rawConn, err := d.DialContext(ctx, "tcp", u.Host)
 	if err != nil {
 		return nil, err
 	}
 	if u.Scheme == "https" {
 		tlsConn := tls.Client(rawConn, &tls.Config{MinVersion: tls.VersionTLS12, ServerName: u.Hostname()})
-		if err := tlsConn.HandshakeContext(ctx); err != nil {
+		handshakeCtx, cancel := context.WithTimeout(ctx, zenTLSHandshakeTimeout)
+		defer cancel()
+		if err := tlsConn.HandshakeContext(handshakeCtx); err != nil {
 			rawConn.Close()
 			return nil, err
 		}

@@ -110,8 +110,12 @@ var apiMessages = map[string]map[locale]string{
 		localeEN: "tokens array is empty",
 	},
 	"imported_accounts": {
-		localeZH: "已导入 %d 个账号，失败 %d 个",
-		localeEN: "Imported %d accounts, %d failed",
+		localeZH: "已导入 %d 个账号，失败 %d 个，跳过重复 %d 个",
+		localeEN: "Imported %d accounts, %d failed, %d duplicates skipped",
+	},
+	"account_exists": {
+		localeZH: "账号 %s 已存在，已跳过重复添加",
+		localeEN: "Account %s already exists; duplicate skipped",
 	},
 	"url_required": {
 		localeZH: "必须提供 url",
@@ -193,6 +197,14 @@ var apiMessages = map[string]map[locale]string{
 		localeZH: "模型已删除",
 		localeEN: "model deleted",
 	},
+	"invalid_model_limits": {
+		localeZH: "模型 Token 限制无效：必须为非负数，且最大输出不能超过上下文窗口",
+		localeEN: "invalid model token limits: values must be non-negative and output cannot exceed context",
+	},
+	"model_context_saved": {
+		localeZH: "模型上下文与输出限制已保存",
+		localeEN: "Model context and output limits saved",
+	},
 	"invalid_limit": {
 		localeZH: "无效的 limit",
 		localeEN: "invalid limit",
@@ -217,6 +229,10 @@ var apiMessages = map[string]map[locale]string{
 	"invalid_proxy_strategy": {
 		localeZH: "无效的代理策略，可选：round_robin、random、fill",
 		localeEN: "invalid proxy strategy, must be: round_robin, random, fill",
+	},
+	"cline_proxy_saved": {
+		localeZH: "Cline 出口代理配置已保存",
+		localeEN: "Cline egress proxy config saved",
 	},
 	"invalid_concurrency": {
 		localeZH: "最大并发必须在 1-64 之间",

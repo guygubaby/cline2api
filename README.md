@@ -118,7 +118,7 @@ Responses 流会把上游 `reasoning_content` 转换为标准 reasoning item 与
 
 Chat Completions 对外只返回 OpenAI 标准字段；上游专用的 `reasoning_content`、计费字段与 provider metadata 不会泄漏。需要流式 reasoning 的客户端应使用 Responses。设置 `stream_options: {"include_usage": true}` 时，普通 chunk 的 `usage` 为 `null`，并在 `[DONE]` 前发送 `choices: []` 的最终 usage chunk。Chat 与 Responses 共享 30 秒首事件超时、模型级短暂冷却和最多一次换号重试。
 
-也可以请求虚拟模型 `free`：代理会依次尝试 `z-ai/glm-5.3-flash`、`deepseek/deepseek-v4-flash`、`cline-free/longcat-2.0`。每个模型最多尝试 2 个未冷却账号，整个请求最多 6 次上游初始化，避免免费池故障时产生无界重试；请求日志记录最终实际模型。
+也可以请求虚拟模型 `free`：远程模型同步成功后，代理只使用上游当前仍在架的免费模型，并优先尝试 `z-ai/glm-5.3-flash`、`deepseek/deepseek-v4-flash`、`cline-free/longcat-2.0`；其余新免费模型按上游顺序补入。离线时回退到这三个内置模型。每个模型最多尝试 2 个未冷却账号，避免免费池故障时产生无界重试；请求日志记录最终实际模型。
 
 多用户隔离：每次发往 Cline 的上游尝试都生成独立的 128 位安全随机会话 ID，并同时用于 `X-Task-ID` 和 body `session_id`；401 原请求重放保持同一 ID，新的尝试绝不复用。Zen 压缩状态、客户端缓存键与 user 标识按下游 API Key 的不可逆租户摘要隔离；未配置 API Key 时禁用跨请求共享状态。审计日志只记录随机 request/task ID 和带进程随机密钥的 HMAC-SHA256，不记录提示词或响应正文。不同人员或应用必须使用不同 API Key；账号池仍由实例全局共享，敏感多租户场景还应使用独立实例/账号池。
 
@@ -237,11 +237,12 @@ git push origin v1.0.0
 | `.cline-zen.json` | OpenCode Zen 配置、代理与压缩设置 |
 | `.cline-providers.json` | 第三方渠道、API Key 与模型映射 |
 | `.cline-config.json` | 代理轮询策略与上游请求头 |
+| `.cline-proxy.json` | Cline/WorkOS 出口代理池与选择策略 |
 | `override.md` | System Prompt 覆盖（可选）|
 
 > ⚠️ 账号文件含 refreshToken，第三方渠道文件含 API Key，均属于敏感凭据，不要放入发布包或提交到 Git。
 
-Docker Compose 对已有状态文件使用 bind mount，并用自动创建的 `provider-data`、`config-data` named volume 分别保存第三方渠道配置和代理配置。首次部署只需预先创建这些 bind mount 文件：
+Docker Compose 对已有状态文件使用 bind mount，并用自动创建的 `provider-data`、`config-data` named volume 保存第三方渠道、通用配置和 Cline 出口代理配置。首次部署只需预先创建这些 bind mount 文件：
 
 ```bash
 touch .cline-accounts.json .cline-request-logs.json .cline-zen.json override.md
@@ -262,6 +263,8 @@ docker compose up -d --build
 只有受信任的隔离网络才可临时设置 `CLINE_ALLOW_INSECURE_ADMIN=true` 绕过远程密码要求。
 
 程序优先使用临时文件原子替换；若 Docker 单文件挂载拒绝 `rename`，会自动回退为同步写入挂载文件，确保账号、API Key、Zen 配置与请求日志重启后不会回退。
+
+管理后台可单独配置 Cline 出口代理池。它只作用于 `*.cline.bot` 与 `*.workos.com`，不会把第三方 Provider 流量误送到 Cline 代理；代理密码不会回显到浏览器。Docker 下配置保存于 `config-data` volume。
 
 ## 可用模型
 

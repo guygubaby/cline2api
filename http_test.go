@@ -14,6 +14,15 @@ import (
 func TestHTTPTransportUsesHTTPSProxyFromEnvironment(t *testing.T) {
 	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:8080")
 	t.Setenv("NO_PROXY", "")
+	clineProxyConfigMu.Lock()
+	oldClineProxyConfig := clineProxyConfig
+	clineProxyConfig = defaultClineProxyConfig()
+	clineProxyConfigMu.Unlock()
+	t.Cleanup(func() {
+		clineProxyConfigMu.Lock()
+		clineProxyConfig = oldClineProxyConfig
+		clineProxyConfigMu.Unlock()
+	})
 
 	req, err := http.NewRequest(http.MethodPost, "https://api.workos.com/user_management/authorize/device", nil)
 	if err != nil {

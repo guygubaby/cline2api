@@ -32,11 +32,50 @@ const (
 	cooldownRecoveryRetry     = 5 * time.Minute
 	accountProbeMaxTokens     = 64
 	openAIStreamHeartbeat     = 15 * time.Second
+	minClineUpstreamMaxTokens = 16
 )
 
 // freeModelChain powers the virtual "free" model. Each model gets a small,
 // fixed account budget so an exhausted pool cannot multiply into unbounded retries.
 var freeModelChain = []string{freeModelPrimary, freeModelFallback, freeModelLastResort}
+
+// currentFreeModelChain uses the synchronized Cline catalog once available so
+// a removed free model is never retried merely because it remains in a binary.
+// Known models retain their quality order; newly advertised free models follow
+// in upstream order.
+func currentFreeModelChain() []string {
+	if !remoteModelsActive() {
+		return append([]string(nil), freeModelChain...)
+	}
+	p := loadPool()
+	poolMu.Lock()
+	remoteFree := make([]string, 0)
+	available := make(map[string]bool)
+	for _, model := range p.Models {
+		if model.Source != "remote" || model.Status != "active" || model.Cost != "free" || model.ID == "" || model.ID == virtualFreeModel {
+			continue
+		}
+		if !available[model.ID] {
+			available[model.ID] = true
+			remoteFree = append(remoteFree, model.ID)
+		}
+	}
+	poolMu.Unlock()
+	chain := make([]string, 0, len(remoteFree))
+	added := make(map[string]bool, len(remoteFree))
+	for _, preferred := range freeModelChain {
+		if available[preferred] {
+			chain = append(chain, preferred)
+			added[preferred] = true
+		}
+	}
+	for _, model := range remoteFree {
+		if !added[model] {
+			chain = append(chain, model)
+		}
+	}
+	return chain
+}
 
 // builtinModels 是内置默认模型列表（不可删除），仅作为离线 / 未同步时的 fallback。
 // 同步 Cline 官方推荐模型成功后，getAllModels 以远程模型为主。
@@ -805,9 +844,17 @@ func supportsThinkingToggle(model string) bool {
 func buildUpstreamBody(params map[string]any, stream bool, sessionID string) map[string]any {
 	maxTokens := defaultMaxTokens
 	if value, ok := integerTokenLimit(params["max_tokens"]); ok {
-		maxTokens = value
+		if value > 0 {
+			maxTokens = value
+		}
 	} else if value, ok := integerTokenLimit(params["max_completion_tokens"]); ok {
-		maxTokens = value
+		if value > 0 {
+			maxTokens = value
+		}
+	}
+	if maxTokens > 0 && maxTokens < minClineUpstreamMaxTokens {
+		log.Printf("  clamp Cline max_tokens=%d -> %d (upstream minimum)", maxTokens, minClineUpstreamMaxTokens)
+		maxTokens = minClineUpstreamMaxTokens
 	}
 
 	model := getDefaultModel()
@@ -893,7 +940,7 @@ func callClineAPI(params map[string]any, stream bool) (*http.Response, *Account,
 }
 
 func callFreeClineAPI(params map[string]any, stream bool) (*http.Response, *Account, error) {
-	for _, model := range freeModelChain {
+	for _, model := range currentFreeModelChain() {
 		params["model"] = model
 		for attempt := 0; attempt < freeModelAttemptsPerModel; attempt++ {
 			account := pickAccountForModelStrict(model)

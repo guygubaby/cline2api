@@ -40,6 +40,7 @@ services:
       - CLINE_ALLOW_INSECURE_ADMIN=${CLINE_ALLOW_INSECURE_ADMIN:-false}
       - CLINE_PROVIDERS_PATH=/app/provider-data/.cline-providers.json
       - CLINE_CONFIG_PATH=/app/config-data/.cline-config.json
+      - CLINE_EGRESS_PROXY_CONFIG_PATH=/app/config-data/.cline-proxy.json
 
 volumes:
   provider-data:
