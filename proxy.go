@@ -52,7 +52,7 @@ func currentFreeModelChain() []string {
 	remoteFree := make([]string, 0)
 	available := make(map[string]bool)
 	for _, model := range p.Models {
-		if model.Source != "remote" || model.Status != "active" || model.Cost != "free" || model.ID == "" || model.ID == virtualFreeModel {
+		if model.Source != "remote" || model.Status != "active" || model.Delisted || model.Cost != "free" || model.ID == "" || model.ID == virtualFreeModel {
 			continue
 		}
 		if !available[model.ID] {
@@ -165,15 +165,31 @@ func mergeModelCatalogs(primary, additional []Model) []Model {
 func getDefaultModel() string {
 	p := loadPool()
 	poolMu.Lock()
-	defer poolMu.Unlock()
+	configured := p.DefaultModel
+	models := append([]Model(nil), p.Models...)
+	poolMu.Unlock()
 
-	if p.DefaultModel != "" {
-		return p.DefaultModel
+	if configured != "" {
+		if !remoteModelsActive() {
+			return configured
+		}
+		for _, model := range getAllModels() {
+			if model.ID == configured {
+				return configured
+			}
+		}
 	}
 
-	for _, m := range p.Models {
-		if m.Source == "remote" && m.Cost == "free" {
+	for _, m := range models {
+		if m.Source == "remote" && m.Status == "active" && !m.Delisted && m.Cost == "free" {
 			return m.ID
+		}
+	}
+	if remoteModelsActive() {
+		for _, m := range models {
+			if m.Source == "remote" && m.Status == "active" && !m.Delisted {
+				return m.ID
+			}
 		}
 	}
 
@@ -183,6 +199,26 @@ func getDefaultModel() string {
 		}
 	}
 	return fallbackDefaultModel
+}
+
+func modelMaxOutputLimit(modelID string) int {
+	limit := 0
+	if meta, ok := lookupClineModelMeta(modelID); ok {
+		limit = meta.Output
+	}
+	p := loadPool()
+	poolMu.Lock()
+	defer poolMu.Unlock()
+	for _, model := range p.Models {
+		if model.ID != modelID || model.Output <= 0 || (model.Source != "remote" && !model.Custom) {
+			continue
+		}
+		if limit == 0 || model.Output < limit {
+			limit = model.Output
+		}
+		break
+	}
+	return limit
 }
 
 // 当前监听地址（startProxy 启动时赋值，供管理后台展示）。
@@ -861,6 +897,10 @@ func buildUpstreamBody(params map[string]any, stream bool, sessionID string) map
 	if m, ok := params["model"].(string); ok && m != "" {
 		model = m
 	}
+	if limit := modelMaxOutputLimit(model); limit > 0 && maxTokens > limit {
+		log.Printf("  clamp Cline max_tokens=%d -> %d (model %s hard limit)", maxTokens, limit, model)
+		maxTokens = limit
+	}
 
 	body := map[string]any{
 		"model":      model,
@@ -951,6 +991,9 @@ func callFreeClineAPI(params map[string]any, stream bool) (*http.Response, *Acco
 			if err == nil {
 				return response, usedAccount, nil
 			}
+			if isModelGoneError(upstreamErrorStatus(err), err.Error()) {
+				break
+			}
 			var accountErr *clineAccountUnavailableError
 			if errors.As(err, &accountErr) || upstreamErrorStatus(err) == http.StatusTooManyRequests {
 				continue
@@ -1029,10 +1072,6 @@ func callClineAPIWithAccountUsingClient(client *http.Client, acc *Account, param
 				return nil, acc, &clineAccountUnavailableError{err: fmt.Errorf("account %s token expired permanently", acc.Email)}
 			}
 		} else {
-			poolMu.Lock()
-			acc.Status = "expired"
-			poolMu.Unlock()
-			savePool()
 			return nil, acc, &clineAccountUnavailableError{err: fmt.Errorf("account %s refresh failed: %w", acc.Email, err)}
 		}
 	}
@@ -1054,6 +1093,9 @@ func callClineAPIWithAccountUsingClient(client *http.Client, acc *Account, param
 				poolMu.Unlock()
 				savePool()
 			}
+		}
+		if model, _ := body["model"].(string); model != "" && isModelGoneError(resp.StatusCode, bodyStr) {
+			markModelGone(model)
 		}
 		return nil, acc, newUpstreamHTTPError(resp.StatusCode, bodyStr)
 	}
@@ -2843,24 +2885,34 @@ func handleAnthropicStreamPrepared(w http.ResponseWriter, upstream *http.Respons
 
 	msgID := "msg_" + secureRandomHex(16)
 	stopReason := "end_turn"
-	emit("message_start", map[string]any{
-		"type": "message_start",
-		"message": map[string]any{
-			"id":            msgID,
-			"type":          "message",
-			"role":          "assistant",
-			"content":       []any{},
-			"model":         reqLog.Model,
-			"stop_reason":   nil,
-			"stop_sequence": nil,
-			"usage": map[string]any{
-				"input_tokens":                estimatedInputTokens,
-				"cache_creation_input_tokens": 0,
-				"cache_read_input_tokens":     0,
-				"output_tokens":               0,
+	messageStarted := false
+	emitMessageStart := func(model string) {
+		if messageStarted {
+			return
+		}
+		messageStarted = true
+		if strings.TrimSpace(model) == "" {
+			model = reqLog.Model
+		}
+		emit("message_start", map[string]any{
+			"type": "message_start",
+			"message": map[string]any{
+				"id":            msgID,
+				"type":          "message",
+				"role":          "assistant",
+				"content":       []any{},
+				"model":         model,
+				"stop_reason":   nil,
+				"stop_sequence": nil,
+				"usage": map[string]any{
+					"input_tokens":                estimatedInputTokens,
+					"cache_creation_input_tokens": 0,
+					"cache_read_input_tokens":     0,
+					"output_tokens":               0,
+				},
 			},
-		},
-	})
+		})
+	}
 
 	nextContentIndex := 0
 	textIndex := -1
@@ -2984,6 +3036,7 @@ func handleAnthropicStreamPrepared(w http.ResponseWriter, upstream *http.Respons
 			if !errors.Is(err, io.EOF) {
 				streamFailure = fmt.Errorf("read upstream stream: %w", err)
 				if !errors.Is(streamFailure, context.Canceled) {
+					emitMessageStart(reqLog.Model)
 					emit("error", map[string]any{
 						"type":  "error",
 						"error": map[string]any{"type": "api_error", "message": streamFailure.Error()},
@@ -3010,6 +3063,8 @@ func handleAnthropicStreamPrepared(w http.ResponseWriter, upstream *http.Respons
 				obj = d
 			}
 		}
+		upstreamModel, _ := obj["model"].(string)
+		emitMessageStart(upstreamModel)
 		if rawUsage, ok := obj["usage"].(map[string]any); ok {
 			latestRawUsage = rawUsage
 		}
@@ -3167,6 +3222,7 @@ func handleAnthropicStreamPrepared(w http.ResponseWriter, upstream *http.Respons
 		}
 	}
 
+	emitMessageStart(reqLog.Model)
 	closeThinkingBlock()
 	closeTextBlock()
 

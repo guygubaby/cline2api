@@ -242,14 +242,8 @@ func refreshAccountTokenLocked(acc *Account) error {
 
 	resp, err := refreshClineToken(acc.RefreshToken)
 	if err != nil {
-		// A proactive refresh can fail transiently while the current access token
-		// is still usable. Keep that account active so the scheduler can retry.
-		if acc.AccessToken == "" || time.Now().UnixMilli() >= acc.ExpiresAt {
-			poolMu.Lock()
-			acc.Status = "expired"
-			poolMu.Unlock()
-			savePool()
-		}
+		applyRefreshFailureState(acc, err, time.Now())
+		savePool()
 		return fmt.Errorf("token refresh failed: %w", err)
 	}
 
@@ -263,6 +257,24 @@ func refreshAccountTokenLocked(acc *Account) error {
 	poolMu.Unlock()
 	savePool()
 	return nil
+}
+
+func applyRefreshFailureState(acc *Account, err error, now time.Time) {
+	poolMu.Lock()
+	defer poolMu.Unlock()
+	if isRefreshRejected(err) {
+		acc.Status = "expired"
+		acc.CooldownUntil = time.Time{}
+		return
+	}
+	// A proactive refresh can fail while the current access token is still
+	// usable. Keep serving it and let the scheduler retry later.
+	if acc.AccessToken != "" && now.UnixMilli() < acc.ExpiresAt {
+		acc.Status = "active"
+		return
+	}
+	acc.Status = "cooldown"
+	acc.CooldownUntil = now.Add(cooldownRecoveryRetry)
 }
 
 func snapshotAccounts() []*Account {

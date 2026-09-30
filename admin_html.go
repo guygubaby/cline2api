@@ -151,13 +151,17 @@ th{color:var(--text2);font-weight:600;font-size:11px;text-transform:uppercase;le
 tbody tr:last-child td{border-bottom:none}
 tbody tr{transition:background 0.15s var(--ease)}
 tbody tr:hover{background:var(--surface2)}
-.account-table{min-width:1040px}
-.account-table>thead>tr>th:first-child,.account-table>tbody>.account-summary-row>td:first-child{width:16%}
-.account-table>thead>tr>th:nth-child(2),.account-table>tbody>.account-summary-row>td:nth-child(2){width:8%}
-.account-table>thead>tr>th:nth-child(3),.account-table>tbody>.account-summary-row>td:nth-child(3){width:5%}
-.account-table>thead>tr>th:nth-child(4),.account-table>tbody>.account-summary-row>td:nth-child(4),.account-table>thead>tr>th:nth-child(5),.account-table>tbody>.account-summary-row>td:nth-child(5),.account-table>thead>tr>th:nth-child(6),.account-table>tbody>.account-summary-row>td:nth-child(6),.account-table>thead>tr>th:nth-child(7),.account-table>tbody>.account-summary-row>td:nth-child(7){width:7%;text-align:right;font-variant-numeric:tabular-nums}
-.account-table>thead>tr>th:nth-child(8),.account-table>tbody>.account-summary-row>td:nth-child(8),.account-table>thead>tr>th:nth-child(9),.account-table>tbody>.account-summary-row>td:nth-child(9){width:11%;white-space:nowrap;color:var(--text2)}
+.account-table{min-width:1160px}
+.account-table>thead>tr>th:first-child,.account-table>tbody>.account-summary-row>td:first-child{width:42px;text-align:center}
+.account-table>thead>tr>th:nth-child(2),.account-table>tbody>.account-summary-row>td:nth-child(2){width:48px;text-align:right;color:var(--text3)}
+.account-table>thead>tr>th:nth-child(3),.account-table>tbody>.account-summary-row>td:nth-child(3){width:16%}
+.account-table>thead>tr>th:nth-child(4),.account-table>tbody>.account-summary-row>td:nth-child(4){width:8%}
+.account-table>thead>tr>th:nth-child(5),.account-table>tbody>.account-summary-row>td:nth-child(5){width:5%}
+.account-table>thead>tr>th:nth-child(6),.account-table>tbody>.account-summary-row>td:nth-child(6),.account-table>thead>tr>th:nth-child(7),.account-table>tbody>.account-summary-row>td:nth-child(7),.account-table>thead>tr>th:nth-child(8),.account-table>tbody>.account-summary-row>td:nth-child(8),.account-table>thead>tr>th:nth-child(9),.account-table>tbody>.account-summary-row>td:nth-child(9){width:7%;text-align:right;font-variant-numeric:tabular-nums}
+.account-table>thead>tr>th:nth-child(10),.account-table>tbody>.account-summary-row>td:nth-child(10),.account-table>thead>tr>th:nth-child(11),.account-table>tbody>.account-summary-row>td:nth-child(11){width:11%;white-space:nowrap;color:var(--text2)}
 .account-table>thead>tr>th:last-child,.account-table>tbody>.account-summary-row>td:last-child{width:156px;min-width:156px;text-align:right;white-space:nowrap}
+.account-select{width:16px;height:16px;accent-color:var(--accent);cursor:pointer}
+.account-pager{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 16px;border-top:1px solid var(--border2);color:var(--text2);font-size:12px}
 .account-actions{display:flex;align-items:center;justify-content:flex-end;gap:4px}
 .account-actions .btn{width:32px;padding-left:0;padding-right:0;justify-content:center;flex:0 0 auto}
 .account-model-row>td{padding:0;border-bottom-color:var(--border)}
@@ -268,6 +272,7 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
 .empty-state .icon svg{width:24px;height:24px}
 
 .model-tag{display:inline-block;padding:4px 10px;border-radius:8px;font-size:12px;font-weight:500;background:var(--surface2);color:var(--text2);margin:3px;border:1px solid var(--border2)}
+.delisted-badge{display:inline-block;margin-left:6px;padding:1px 6px;border-radius:6px;font-size:10px;color:var(--red);border:1px solid var(--red);font-weight:600}
 .model-tag.free{border-color:var(--green);color:var(--green);background:var(--green-soft)}
 .model-tag.pass{border-color:var(--yellow);color:var(--yellow);background:var(--yellow-soft)}
 .model-item{display:inline-flex;align-items:center;gap:2px;margin:3px}
@@ -593,9 +598,11 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
       <div class="large-title">账号管理</div>
       <div class="large-subtitle">管理 Cline 账号池中的所有账号</div>
     </div>
-    <div style="display:flex;gap:8px">
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
       <button class="btn btn-sm" onclick="testAllAccounts(this)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>测试全部</button>
-      <button class="btn btn-sm" onclick="exportAccounts()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>导出</button>
+      <button class="btn btn-sm" onclick="exportSelectedAccounts()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>导出选中<span id="selectedExportCount"></span></button>
+      <button class="btn btn-sm btn-danger" onclick="deleteSelectedAccounts(this)">删除选中<span id="selectedDeleteCount"></span></button>
+      <button class="btn btn-sm" onclick="exportAccounts()">导出全部</button>
       <button class="btn btn-primary btn-sm" onclick="switchTab('import')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>添加</button>
       <button class="btn btn-sm" onclick="loadAccounts()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>刷新</button>
     </div>
@@ -604,13 +611,14 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
     <div class="section-body flush">
       <table class="account-table">
         <thead>
-          <tr><th>邮箱</th><th>状态</th><th>请求</th><th>输入</th><th>输出</th><th>总 Token</th><th>缓存</th><th>最后使用</th><th>创建时间</th><th>操作</th></tr>
+          <tr><th><input id="accountSelectPage" class="account-select" type="checkbox" onchange="toggleCurrentAccountPage(this.checked)" aria-label="全选本页"></th><th>#</th><th>邮箱</th><th>状态</th><th>请求</th><th>输入</th><th>输出</th><th>总 Token</th><th>缓存</th><th>最后使用</th><th>创建时间</th><th>操作</th></tr>
         </thead>
         <tbody id="accountTableBody">
-          <tr><td colspan="10" class="empty">加载中…</td></tr>
+          <tr><td colspan="12" class="empty">加载中…</td></tr>
         </tbody>
       </table>
       <div id="accountCards" class="account-cards"></div>
+      <div id="accountPager" class="account-pager" style="display:none"></div>
     </div>
   </div>
 </div>
@@ -1514,6 +1522,13 @@ const I18N = {
   '账号添加成功: ': 'Account added: ',
   '添加失败: ': 'Add failed: ',
   '账号已导出': 'Accounts exported',
+  '选中账号已导出': 'Selected accounts exported',
+  '请先选择账号': 'Select at least one account',
+  '确定删除选中的账号？': 'Delete the selected accounts?',
+  '删除中...': 'Deleting...',
+  '共': 'Total',
+  '个账号': 'accounts',
+  '每页': 'per page',
   '导出失败: ': 'Export failed: ',
   '请输入账号数据': 'Enter account data',
   '导入完成': 'Import done',
@@ -1559,6 +1574,9 @@ const I18N = {
   '从未同步': 'Never synced',
   '新增模型': 'Added models',
   '移除模型': 'Removed models',
+  '已下架（暂时保留）': 'Delisted (retained temporarily)',
+  '已下架': 'Delisted',
+  '已从上游列表移除；确认不可用后会自动清理': 'Removed from the upstream catalog; automatically cleaned up once confirmed unavailable',
   '模型无变化': 'No model changes',
   '模型列表已更新': 'Model list updated',
   '模型上下文与输出限制': 'Model Context and Output Limits',
@@ -1922,15 +1940,28 @@ async function loadStats() {
 }
 
 // ========== 账号管理 ==========
+const _accountPageSize = 20;
+let _accountPage = 1;
+let _accountList = [];
+const _selectedAccountIds = new Set();
+
 async function loadAccounts() {
   try {
     const d = await api('GET', '/accounts');
-    const list = d.data.accounts;
+    _accountList = d.data.accounts || [];
+    const liveIds = new Set(_accountList.map(account => account.accountId));
+    [..._selectedAccountIds].forEach(id => { if (!liveIds.has(id)) _selectedAccountIds.delete(id); });
+    const totalPages = Math.max(1, Math.ceil(_accountList.length / _accountPageSize));
+    _accountPage = Math.min(_accountPage, totalPages);
+    const pageStart = (_accountPage - 1) * _accountPageSize;
+    const list = _accountList.slice(pageStart, pageStart + _accountPageSize);
     const tbody = _('accountTableBody');
     const cards = _('accountCards');
-    if (!list || list.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="10" class="empty">👋 还没有账号 — 前往 <a href="#" onclick="switchTab(\'import\')" style="color:var(--accent);cursor:pointer">' + t('导入账号') + '</a> ' + t('添加你的第一个 Cline 账号') + '</td></tr>';
+    if (_accountList.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="12" class="empty">👋 还没有账号 — 前往 <a href="#" onclick="switchTab(\'import\')" style="color:var(--accent);cursor:pointer">' + t('导入账号') + '</a> ' + t('添加你的第一个 Cline 账号') + '</td></tr>';
       cards.innerHTML = '<div class="empty">👋 还没有账号 — 前往 <a href="#" onclick="switchTab(\'import\')" style="color:var(--accent)">' + t('导入账号') + '</a> ' + t('添加你的第一个 Cline 账号') + '</div>';
+      renderAccountPager();
+      updateAccountSelectionUI();
       return;
     }
     const sn = { active: t('活跃'), cooldown: t('冷却'), expired: t('已过期') };
@@ -1977,7 +2008,7 @@ async function loadAccounts() {
           '<thead><tr><th>' + t('模型') + '</th><th>' + t('状态') + '</th><th>' + t('请求') + '</th><th>' + t('输入') + '</th><th>' + t('输出') + '</th><th>' + t('总 Token') + '</th><th>' + t('缓存') + '</th></tr></thead>' +
           '<tbody>' + body + '</tbody></table></div></div>';
     };
-    tbody.innerHTML = list.map(a => {
+    tbody.innerHTML = list.map((a, pageIndex) => {
       const lu = a.lastUsed ? new Date(a.lastUsed).toLocaleString(LC()) : '-';
       const cr = a.createdAt ? new Date(a.createdAt).toLocaleString(LC()) : '-';
       const statusBadge = a.status === 'cooldown' && a.cooldownUntil
@@ -1986,6 +2017,8 @@ async function loadAccounts() {
       // 始终显示模型统计展开按钮（无数据时子行提示暂无）
       const expander = '<button class="btn btn-sm btn-icon" onclick="toggleModelRow(\'' + a.accountId + '\', this)" title="' + t('展开') + '" aria-label="' + t('展开') + '">▸</button>';
       return '<tr class="account-summary-row">' +
+        '<td><input class="account-select" data-account-id="' + esc(a.accountId) + '" type="checkbox" ' + (_selectedAccountIds.has(a.accountId) ? 'checked ' : '') + 'onchange="toggleAccountSelection(' + inlineArg(a.accountId) + ',this.checked)" aria-label="选择账号"></td>' +
+        '<td>' + (pageStart + pageIndex + 1) + '</td>' +
         '<td>' + esc(a.email) + '</td>' +
         '<td>' + statusBadge + '</td>' +
         '<td>' + formatNumber(a.usageCount) + '</td>' +
@@ -2000,7 +2033,7 @@ async function loadAccounts() {
           '<button class="btn btn-sm" onclick="resetAccount(\'' + a.accountId + '\')" title="重置" aria-label="重置">↻</button>' +
           '<button class="btn btn-sm btn-danger" onclick="deleteAccount(\'' + a.accountId + '\')" title="删除" aria-label="删除">✕</button>' +
         '</span></td></tr>' +
-        '<tr class="account-model-row" id="modelRow-' + a.accountId + '" style="display:none"><td colspan="10">' + modelStatsPanel(a) + '</td></tr>';
+        '<tr class="account-model-row" id="modelRow-' + a.accountId + '" style="display:none"><td colspan="12">' + modelStatsPanel(a) + '</td></tr>';
     }).join('');
     cards.innerHTML = list.map(a => {
       const lu = a.lastUsed ? new Date(a.lastUsed).toLocaleString(LC()) : t('从未使用');
@@ -2032,7 +2065,7 @@ async function loadAccounts() {
         '<div style="font-size:11px;font-weight:600;color:var(--text2);margin-bottom:4px">' + t('按模型统计（免费用量 + 首字延迟）') +
           (coolingCount ? ' · <span style="color:var(--yellow)">⏳ ' + coolingCount + '</span>' : '') + '</div>' + items + '</div>';
       return '<article class="account-card">' +
-        '<div class="account-card-header"><span class="account-email">' + esc(a.email) + '</span>' +
+        '<div class="account-card-header"><label class="flex"><input class="account-select" data-account-id="' + esc(a.accountId) + '" type="checkbox" ' + (_selectedAccountIds.has(a.accountId) ? 'checked ' : '') + 'onchange="toggleAccountSelection(' + inlineArg(a.accountId) + ',this.checked)"><span class="account-email">' + esc(a.email) + '</span></label>' +
         cardStatus + '</div>' +
         '<div class="account-metrics">' +
           '<div class="account-metric"><span class="account-metric-label">' + t('请求') + '</span><span class="account-metric-value">' + formatNumber(a.usageCount) + '</span></div>' +
@@ -2047,7 +2080,55 @@ async function loadAccounts() {
           '<button class="btn btn-sm btn-danger" onclick="deleteAccount(\'' + a.accountId + '\')" title="删除" aria-label="删除">✕</button>' +
         '</span></div></article>';
     }).join('');
+    renderAccountPager();
+    updateAccountSelectionUI();
   } catch (e) { toast(t('加载账号失败: ') + e.message, 'error'); }
+}
+
+function renderAccountPager() {
+  const pager = _('accountPager');
+  const total = _accountList.length;
+  const pages = Math.max(1, Math.ceil(total / _accountPageSize));
+  if (total <= _accountPageSize) { pager.style.display = 'none'; return; }
+  pager.style.display = 'flex';
+  pager.innerHTML = '<span>' + t('共') + ' ' + total + ' ' + t('个账号') + ' · ' + t('每页') + ' ' + _accountPageSize + '</span>' +
+    '<span class="flex"><button class="btn btn-sm" ' + (_accountPage <= 1 ? 'disabled' : '') + ' onclick="goToAccountPage(' + (_accountPage - 1) + ')">‹</button>' +
+    '<span class="mono">' + _accountPage + ' / ' + pages + '</span>' +
+    '<button class="btn btn-sm" ' + (_accountPage >= pages ? 'disabled' : '') + ' onclick="goToAccountPage(' + (_accountPage + 1) + ')">›</button></span>';
+}
+
+function goToAccountPage(page) {
+  _accountPage = page;
+  loadAccounts();
+}
+
+function currentAccountPageIds() {
+  const start = (_accountPage - 1) * _accountPageSize;
+  return _accountList.slice(start, start + _accountPageSize).map(account => account.accountId);
+}
+
+function toggleAccountSelection(id, checked) {
+  if (checked) _selectedAccountIds.add(id); else _selectedAccountIds.delete(id);
+  document.querySelectorAll('.account-select[data-account-id]').forEach(input => {
+    if (input.dataset.accountId === id) input.checked = checked;
+  });
+  updateAccountSelectionUI();
+}
+
+function toggleCurrentAccountPage(checked) {
+  currentAccountPageIds().forEach(id => { if (checked) _selectedAccountIds.add(id); else _selectedAccountIds.delete(id); });
+  loadAccounts();
+}
+
+function updateAccountSelectionUI() {
+  const count = _selectedAccountIds.size;
+  _('selectedExportCount').textContent = count ? ' (' + count + ')' : '';
+  _('selectedDeleteCount').textContent = count ? ' (' + count + ')' : '';
+  const pageIds = currentAccountPageIds();
+  const selectedOnPage = pageIds.filter(id => _selectedAccountIds.has(id)).length;
+  const selectPage = _('accountSelectPage');
+  selectPage.checked = pageIds.length > 0 && selectedOnPage === pageIds.length;
+  selectPage.indeterminate = selectedOnPage > 0 && selectedOnPage < pageIds.length;
 }
 
 // 展开/收起账号的模型统计子行（表格视图）
@@ -2206,6 +2287,56 @@ async function exportAccounts() {
     URL.revokeObjectURL(url);
     toast(t('账号已导出'), 'success');
   } catch (e) { toast(t('导出失败: ') + e.message, 'error'); }
+}
+
+async function exportSelectedAccounts() {
+  const ids = [..._selectedAccountIds];
+  if (!ids.length) { toast(t('请先选择账号'), 'info'); return; }
+  try {
+    const res = await fetch(API + '/accounts/export', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids })
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'cline-accounts-export.json';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    toast(t('选中账号已导出'), 'success');
+  } catch (e) { toast(t('导出失败: ') + e.message, 'error'); }
+}
+
+async function deleteSelectedAccounts(button) {
+  const ids = [..._selectedAccountIds];
+  if (!ids.length) { toast(t('请先选择账号'), 'info'); return; }
+  if (!confirm(t('确定删除选中的账号？') + ' (' + ids.length + ')')) return;
+  const original = button.innerHTML;
+  button.disabled = true;
+  button.innerHTML = '<span class="loading"></span> ' + t('删除中...');
+  let deleted = 0;
+  try {
+    for (const accountId of ids) {
+      await api('POST', '/accounts/delete', { accountId });
+      deleted++;
+    }
+    _selectedAccountIds.clear();
+    toast(t('账号已删除') + ': ' + deleted, 'success');
+    await loadAccounts();
+    await loadStats();
+  } catch (e) {
+    toast(t('删除失败: ') + e.message + ' (' + deleted + '/' + ids.length + ')', 'error');
+    await loadAccounts();
+  } finally {
+    button.disabled = false;
+    button.innerHTML = original;
+    updateAccountSelectionUI();
+  }
 }
 
 // ========== 批量导入 ==========
@@ -2403,8 +2534,9 @@ function isOcModel(m) { return m.source === 'zen' || m.provider === 'opencode'; 
 function isCustomProviderModel(m) { return m.source === 'custom_provider'; }
 
 function renderModelChip(m) {
-  let item = '<span class="model-tag ' + (m.cost || 'free') + '">' + esc(m.id) + '</span>';
-  if (m.custom) {
+  let item = '<span class="model-tag ' + (m.cost || 'free') + '">' + esc(m.id) +
+    (m.delisted ? '<span class="delisted-badge" title="' + t('已从上游列表移除；确认不可用后会自动清理') + '">' + t('已下架') + '</span>' : '') + '</span>';
+  if (m.custom || m.delisted) {
     item += '<button class="btn btn-sm btn-danger" style="padding:2px 6px" onclick="deleteModel(' + inlineArg(m.id) + ')" title="' + t('删除') + '" aria-label="' + t('删除') + '">✕</button>';
   }
   return '<span class="model-item">' + item + '</span>';
@@ -2980,7 +3112,7 @@ function showModelSyncModal(res) {
   const rem = (res.removed || []).map(m => '<div style="padding:3px 0;color:var(--text3)">- <span class="mono">' + esc(m) + '</span></div>').join('');
   let body = '';
   if (add) body += '<div style="color:var(--green);font-weight:600;margin-bottom:6px">' + t('新增模型') + '</div>' + add;
-  if (rem) body += '<div style="color:var(--text2);font-weight:600;margin:10px 0 6px">' + t('移除模型') + '</div>' + rem;
+  if (rem) body += '<div style="color:var(--text2);font-weight:600;margin:10px 0 6px">' + t('已下架（暂时保留）') + '</div>' + rem;
   if (!body) body = '<div style="color:var(--text2)">' + t('模型无变化') + '</div>';
   box.innerHTML =
     '<h2 style="margin:0 0 10px;font-size:18px">' + t('模型同步') + '</h2>' +

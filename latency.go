@@ -57,8 +57,8 @@ func recordSuccessfulAccountAttempt(params map[string]any, account *Account, mod
 	coolSlowAccountIfNeeded(account, model, attemptElapsed)
 }
 
-func coolAccountAfterStreamInitializationError(account *Account, model string, err error) {
-	if account == nil {
+func coolAccountAfterStreamInitializationError(params map[string]any, account *Account, model string, err error) {
+	if account == nil || proxyRequestContext(params).Err() != nil {
 		return
 	}
 	switch {

@@ -57,6 +57,10 @@ var apiMessages = map[string]map[locale]string{
 		localeZH: "JSON 无效",
 		localeEN: "invalid JSON",
 	},
+	"no_accounts_selected": {
+		localeZH: "请至少选择一个账号",
+		localeEN: "Select at least one account",
+	},
 	"proxy_config_save_failed": {
 		localeZH: "代理配置保存失败",
 		localeEN: "Failed to save proxy configuration",

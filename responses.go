@@ -713,7 +713,10 @@ func callClinePreparedStreamWithTimeout(params map[string]any, timeout time.Dura
 		elapsed := time.Since(attemptStarted)
 		recordSuccessfulAccountAttempt(params, account, model, elapsed, elapsed)
 	}
-	coolAccountAfterStreamInitializationError(account, model, err)
+	coolAccountAfterStreamInitializationError(params, account, model, err)
+	if proxyRequestContext(params).Err() != nil {
+		return response, account, 0, err
+	}
 	if err == nil || !retryableStreamInitializationError(err) {
 		return response, account, 0, err
 	}
@@ -733,7 +736,7 @@ func callClinePreparedStreamWithTimeout(params map[string]any, timeout time.Dura
 		elapsed := time.Since(retryStarted)
 		recordSuccessfulAccountAttempt(params, retryAccount, model, elapsed, time.Since(attemptStarted))
 	}
-	coolAccountAfterStreamInitializationError(retryAccount, model, retryErr)
+	coolAccountAfterStreamInitializationError(params, retryAccount, model, retryErr)
 	return retryResponse, retryAccount, 1, retryErr
 }
 
@@ -769,7 +772,7 @@ func retryClineChatStream(params map[string]any, excluded *Account, timeout time
 		elapsed := time.Since(attemptStarted)
 		recordSuccessfulAccountAttempt(params, account, model, elapsed, elapsed)
 	}
-	coolAccountAfterStreamInitializationError(account, model, err)
+	coolAccountAfterStreamInitializationError(params, account, model, err)
 	return response, account, err
 }
 

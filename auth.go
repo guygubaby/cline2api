@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -213,6 +215,26 @@ func registerWithCline(workosAccess, workosRefresh string) (*clineAuthResp, erro
 	return &c, nil
 }
 
+// refreshRejectedError means Cline explicitly rejected the refresh token.
+// Transport failures and upstream 5xx responses are transient and must not
+// permanently disable an account.
+type refreshRejectedError struct {
+	statusCode int
+}
+
+func (err *refreshRejectedError) Error() string {
+	return fmt.Sprintf("cline refresh rejected: %d", err.statusCode)
+}
+
+func isRefreshRejectionStatus(status int) bool {
+	return status == http.StatusBadRequest || status == http.StatusUnauthorized || status == http.StatusForbidden
+}
+
+func isRefreshRejected(err error) bool {
+	var rejected *refreshRejectedError
+	return errors.As(err, &rejected)
+}
+
 func refreshClineToken(refreshToken string) (*clineRefreshResp, error) {
 	body := map[string]string{
 		"refreshToken": refreshToken,
@@ -225,6 +247,9 @@ func refreshClineToken(refreshToken string) (*clineRefreshResp, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
+		if isRefreshRejectionStatus(resp.StatusCode) {
+			return nil, &refreshRejectedError{statusCode: resp.StatusCode}
+		}
 		return nil, fmt.Errorf("cline refresh failed: %d", resp.StatusCode)
 	}
 

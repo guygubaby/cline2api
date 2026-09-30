@@ -782,6 +782,9 @@ func callZenAPI(params map[string]any, stream bool) (*http.Response, error) {
 		resp.Body.Close()
 		watchCancel()
 		reason := fmt.Sprintf("zen API %d: %s", resp.StatusCode, truncate(string(bodyBytes), 500))
+		if model := bodyParamsModel(params); model != "" && isModelGoneError(resp.StatusCode, string(bodyBytes)) {
+			markModelGone(model)
+		}
 
 		if isRateLimited(resp.StatusCode, string(bodyBytes)) {
 			retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"))
@@ -1040,11 +1043,13 @@ func syncZenModels() modelSyncResult {
 	poolMu.Lock()
 	oldIDs := make(map[string]bool)
 	oldZen := make(map[string]Model)
+	oldZenOrder := make([]Model, 0)
 	var kept []Model
 	for _, m := range p.Models {
 		if m.Source == "zen" {
 			oldIDs[m.ID] = true
 			oldZen[m.ID] = m
+			oldZenOrder = append(oldZenOrder, m)
 			continue
 		}
 		kept = append(kept, m)
@@ -1055,10 +1060,15 @@ func syncZenModels() modelSyncResult {
 			res.Added = append(res.Added, m.ID)
 		}
 	}
-	for id := range oldIDs {
-		if !seen[id] {
-			res.Removed = append(res.Removed, id)
+	for _, old := range oldZenOrder {
+		if seen[old.ID] {
+			continue
 		}
+		if !old.Delisted {
+			res.Removed = append(res.Removed, old.ID)
+		}
+		old.Delisted = true
+		kept = append(kept, old)
 	}
 	kept = append(kept, remote...)
 	p.Models = kept

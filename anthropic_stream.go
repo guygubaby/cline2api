@@ -362,7 +362,10 @@ func callClineAnthropicStream(params map[string]any) (*http.Response, *Account, 
 	return callClineAnthropicStreamWithTimeout(params, upstreamFirstEventTimeout)
 }
 
-func coolAnthropicAccountAfterPrepareError(account *Account, model string, err error) {
+func coolAnthropicAccountAfterPrepareError(params map[string]any, account *Account, model string, err error) {
+	if proxyRequestContext(params).Err() != nil {
+		return
+	}
 	switch {
 	case errors.Is(err, errUpstreamFirstEventTimeout):
 		setModelCooldown(account, model, time.Now().Add(slowAccountModelCooldown))
@@ -388,9 +391,12 @@ func callClineAnthropicStreamWithTimeout(params map[string]any, firstEventTimeou
 	if !isEmptyResponseError(prepareErr) && !errors.Is(prepareErr, errUpstreamFirstEventTimeout) {
 		return nil, account, diagnostic, prepareErr
 	}
+	if proxyRequestContext(params).Err() != nil {
+		return nil, account, diagnostic, prepareErr
+	}
 
 	model, _ := params["model"].(string)
-	coolAnthropicAccountAfterPrepareError(account, model, prepareErr)
+	coolAnthropicAccountAfterPrepareError(params, account, model, prepareErr)
 	if errors.Is(prepareErr, errUpstreamFirstEventTimeout) {
 		return nil, account, diagnostic, prepareErr
 	}
@@ -425,13 +431,13 @@ func callClineAnthropicStreamWithTimeout(params map[string]any, firstEventTimeou
 		lastDiagnostic = retryDiagnostic
 		lastErr = retryPrepareErr
 		if errors.Is(retryPrepareErr, errUpstreamFirstEventTimeout) {
-			coolAnthropicAccountAfterPrepareError(retryAccount, model, retryPrepareErr)
+			coolAnthropicAccountAfterPrepareError(params, retryAccount, model, retryPrepareErr)
 			return nil, retryAccount, retryDiagnostic, retryPrepareErr
 		}
 		if !isEmptyResponseError(retryPrepareErr) && !errors.Is(retryPrepareErr, errUpstreamFirstEventTimeout) {
 			return nil, retryAccount, retryDiagnostic, retryPrepareErr
 		}
-		coolAnthropicAccountAfterPrepareError(retryAccount, model, retryPrepareErr)
+		coolAnthropicAccountAfterPrepareError(params, retryAccount, model, retryPrepareErr)
 	}
 	return nil, lastAccount, lastDiagnostic, lastErr
 }

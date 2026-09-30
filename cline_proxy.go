@@ -13,6 +13,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/net/http/httpproxy"
 )
 
 const (
@@ -30,7 +32,12 @@ var (
 	clineProxySaveMu   sync.Mutex
 	clineProxyConfig   *clineProxyConfigData
 	clineProxyCounter  atomic.Uint64
-	clineEnvProxy      = http.ProxyFromEnvironment
+	clineEnvProxy      = func(request *http.Request) (*url.URL, error) {
+		if request == nil || request.URL == nil {
+			return nil, nil
+		}
+		return httpproxy.FromEnvironment().ProxyFunc()(request.URL)
+	}
 )
 
 func clineProxyConfigPath() string {

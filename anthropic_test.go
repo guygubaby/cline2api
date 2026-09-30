@@ -240,7 +240,7 @@ func TestAnthropicStreamStartsWithCurrentMessageShape(t *testing.T) {
 	}, "\n")
 	upstream := &http.Response{Body: io.NopCloser(strings.NewReader(upstreamBody))}
 	recorder := httptest.NewRecorder()
-	reqLog := &RequestLog{StartedAt: time.Now(), Protocol: "anthropic", Model: "m1", Stream: true}
+	reqLog := &RequestLog{StartedAt: time.Now(), Protocol: "anthropic", Model: "requested-model", Stream: true}
 
 	handleAnthropicStream(recorder, upstream, nil, reqLog, 42)
 

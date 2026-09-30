@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -12,7 +13,7 @@ import (
 
 // clineRecommendedModelsURL 是 Cline 官方的「推荐/免费模型」接口（无需认证）。
 // 参考 model-api.md：Cline 4.1.15 的 Free Models 由该接口直接返回。
-const clineRecommendedModelsURL = "https://api.cline.bot/api/v1/ai/cline/recommended-models"
+var clineRecommendedModelsURL = "https://api.cline.bot/api/v1/ai/cline/recommended-models"
 
 const modelSyncTimeout = 10 * time.Second
 
@@ -43,6 +44,34 @@ type modelSyncResult struct {
 	SyncedAt string   `json:"syncedAt"`
 	Total    int      `json:"total"`
 	Error    string   `json:"error,omitempty"`
+}
+
+type modelMeta struct {
+	Context int
+	Output  int
+}
+
+// The recommended-models endpoint may omit limits. Keep only limits confirmed
+// as hard upstream constraints here; unknown models remain unclamped.
+var clineModelMeta = map[string]modelMeta{
+	"gemini-3.8-flash": {Context: 1_048_576, Output: 65_536},
+}
+
+var clineModelPrefixes = []string{"cline-free/", "cline-pass/", "google/", "cline/"}
+
+func modelBaseName(id string) string {
+	id = strings.TrimSpace(id)
+	for _, prefix := range clineModelPrefixes {
+		if strings.HasPrefix(id, prefix) {
+			return strings.TrimPrefix(id, prefix)
+		}
+	}
+	return id
+}
+
+func lookupClineModelMeta(id string) (modelMeta, bool) {
+	meta, ok := clineModelMeta[modelBaseName(id)]
+	return meta, ok
 }
 
 func preserveLockedModelMetadata(models []Model, previous map[string]Model) {
@@ -157,7 +186,7 @@ func syncClineModels() modelSyncResult {
 			if contextTokens == 0 {
 				contextTokens = m.ContextWin
 			}
-			remote = append(remote, Model{
+			entry := Model{
 				ID:       m.ID,
 				Provider: remoteProvider(m.ID),
 				Cost:     remoteCost(m, inFree),
@@ -166,7 +195,16 @@ func syncClineModels() modelSyncResult {
 				Source:   "remote",
 				Context:  contextTokens,
 				Output:   m.MaxTokens,
-			})
+			}
+			if meta, ok := lookupClineModelMeta(m.ID); ok {
+				if entry.Context == 0 {
+					entry.Context = meta.Context
+				}
+				if entry.Output == 0 {
+					entry.Output = meta.Output
+				}
+			}
+			remote = append(remote, entry)
 		}
 	}
 	addGroup(data.Free, true)
@@ -181,24 +219,44 @@ func syncClineModels() modelSyncResult {
 	p := loadPool()
 	poolMu.Lock()
 	oldRemote := make(map[string]Model)
+	oldRemoteOrder := make([]Model, 0)
 	var kept []Model
 	for _, m := range p.Models {
 		if m.Source == "remote" {
 			oldRemote[m.ID] = m
+			oldRemoteOrder = append(oldRemoteOrder, m)
 			continue
 		}
 		kept = append(kept, m)
 	}
 	preserveLockedModelMetadata(remote, oldRemote)
 	for index := range remote {
+		if meta, ok := lookupClineModelMeta(remote[index].ID); ok {
+			if remote[index].Context == 0 || remote[index].Context > meta.Context {
+				remote[index].Context = meta.Context
+			}
+			if remote[index].Output == 0 || remote[index].Output > meta.Output {
+				remote[index].Output = meta.Output
+			}
+		}
+	}
+	for index := range remote {
 		if _, exists := oldRemote[remote[index].ID]; !exists {
 			res.Added = append(res.Added, remote[index].ID)
 		}
 	}
-	for id := range oldRemote {
-		if !seen[id] {
-			res.Removed = append(res.Removed, id)
+	// A catalog disappearance is not proof that routing has stopped. Preserve
+	// the entry as delisted and remove it only after an explicit model-gone
+	// response (or an administrator action).
+	for _, old := range oldRemoteOrder {
+		if seen[old.ID] {
+			continue
 		}
+		if !old.Delisted {
+			res.Removed = append(res.Removed, old.ID)
+		}
+		old.Delisted = true
+		kept = append(kept, old)
 	}
 	kept = append(kept, remote...)
 	p.Models = kept
@@ -219,6 +277,41 @@ func syncClineModels() modelSyncResult {
 	log.Printf("models sync: %d models, +%d added, -%d removed",
 		res.Total, len(res.Added), len(res.Removed))
 	return res
+}
+
+var modelGonePattern = regexp.MustCompile(
+	`(?i)model[\s_-]*(not[\s_-]*found|does\s+not\s+exist|no\s+such|unknown|invalid)|(invalid|unknown|no\s+such)[\s_-]*model`)
+
+func isModelGoneError(status int, body string) bool {
+	if status != http.StatusBadRequest && status != http.StatusNotFound {
+		return false
+	}
+	return modelGonePattern.MatchString(body)
+}
+
+func markModelGone(model string) {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return
+	}
+	p := loadPool()
+	poolMu.Lock()
+	removed := false
+	for index, candidate := range p.Models {
+		if candidate.ID == model && candidate.Delisted && !candidate.Custom {
+			p.Models = append(p.Models[:index], p.Models[index+1:]...)
+			removed = true
+			break
+		}
+	}
+	if removed && p.DefaultModel == model {
+		p.DefaultModel = ""
+	}
+	poolMu.Unlock()
+	if removed {
+		savePool()
+		log.Printf("model %q removed: upstream confirmed the delisted model no longer exists", model)
+	}
 }
 
 // triggerModelSync 供管理后台手动触发同步；非阻塞等待完成并返回结果。

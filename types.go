@@ -48,6 +48,9 @@ type Model struct {
 	Output  int `json:"output,omitempty"`
 	// MetaLocked keeps administrator-provided limits across upstream model syncs.
 	MetaLocked bool `json:"metaLocked,omitempty"`
+	// Delisted marks a model that disappeared from an upstream catalog. It is
+	// retained until the upstream explicitly reports that the model is gone.
+	Delisted bool `json:"delisted,omitempty"`
 }
 
 // ModelStat 是单个模型在某账号下的用量统计（仅统计 free 模型）。
