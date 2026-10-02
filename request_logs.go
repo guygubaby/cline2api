@@ -54,6 +54,7 @@ type RequestLog struct {
 	ThinkingTokens       int64   `json:"thinkingTokens,omitempty"`
 	RetrySuppressed      bool    `json:"retrySuppressed,omitempty"`
 	promptEchoGuard      *promptEchoGuard
+	toolNames            map[string]string
 }
 
 var (
@@ -224,6 +225,7 @@ func setRequestLogIsolationMetadata(entry *RequestLog, params map[string]any) {
 	if upstreamTTFT, ok := params[proxyUpstreamTTFTParamKey].(int64); ok && upstreamTTFT > 0 {
 		entry.UpstreamTTFTMs = upstreamTTFT
 	}
+	entry.toolNames, _ = params[proxyToolNamesParamKey].(map[string]string)
 }
 
 type requestLogPage struct {

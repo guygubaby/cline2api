@@ -911,6 +911,9 @@ func chatStreamToResponses(w http.ResponseWriter, upstream *http.Response, reqLo
 					var obj map[string]any
 					if json.Unmarshal([]byte(payload), &obj) == nil {
 						obj = unwrapDataEnvelope(obj)
+						if reqLog != nil {
+							restoreToolCallsInResponse(obj, reqLog.toolNames)
+						}
 						eventAt := time.Now()
 						if upstreamError := obj["error"]; upstreamError != nil {
 							streamFailure = streamError(upstreamError)

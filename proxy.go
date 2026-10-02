@@ -1012,6 +1012,7 @@ func callClineAPIWithAccount(acc *Account, params map[string]any, stream bool) (
 }
 
 func callClineAPIWithAccountUsingClient(client *http.Client, acc *Account, params map[string]any, stream bool) (*http.Response, *Account, error) {
+	clampParamsToolNames(params)
 	token, err := ensureAccountToken(acc)
 	if err != nil {
 		return nil, acc, &clineAccountUnavailableError{err: fmt.Errorf("account %s token failed: %w", acc.Email, err)}
@@ -1677,6 +1678,7 @@ streamLoop:
 						break
 					}
 					obj = unwrapDataEnvelope(obj)
+					restoreToolCallsInResponse(obj, reqLog.toolNames)
 					if upstreamError := obj["error"]; upstreamError != nil {
 						streamFailure = streamError(upstreamError)
 						break
@@ -3063,6 +3065,7 @@ func handleAnthropicStreamPrepared(w http.ResponseWriter, upstream *http.Respons
 				obj = d
 			}
 		}
+		restoreToolCallsInResponse(obj, reqLog.toolNames)
 		upstreamModel, _ := obj["model"].(string)
 		emitMessageStart(upstreamModel)
 		if rawUsage, ok := obj["usage"].(map[string]any); ok {

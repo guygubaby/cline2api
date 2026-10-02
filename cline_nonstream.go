@@ -294,6 +294,7 @@ func callClineNonStream(params map[string]any) (map[string]any, *Account, error)
 		result, decodeErr := decodeChatCompletionResponse(response, forceStream)
 		response.Body.Close()
 		if decodeErr == nil {
+			restoreToolCallsInResponse(result, clampParamsToolNames(params))
 			return result, account, nil
 		}
 		err = decodeErr
@@ -322,5 +323,6 @@ func callClineNonStream(params map[string]any) (map[string]any, *Account, error)
 	if retryDecodeErr != nil {
 		return nil, retryAccount, retryDecodeErr
 	}
+	restoreToolCallsInResponse(retryResult, clampParamsToolNames(params))
 	return retryResult, retryAccount, nil
 }
