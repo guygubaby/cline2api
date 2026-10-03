@@ -101,6 +101,8 @@ Model:    z-ai/glm-5.3-flash
 
 自定义渠道可选择 OpenAI Chat Completions (`/chat/completions`)、OpenAI Responses (`/responses`) 或 Anthropic Messages (`/messages`) 作为上游协议。上游响应会归一化，因此下游仍可使用 Chat Completions、Responses 或 Anthropic Messages。
 
+如果某个 Responses 上游要求 `stream: true`，可在该渠道开启“Responses 上游强制流式”。下游非流式请求会在上游流式完成后汇总返回；其他渠道不受影响。
+
 ### API 协议兼容
 
 | 协议 | 标准端点 | 已支持的核心调用 |

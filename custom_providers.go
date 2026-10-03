@@ -51,6 +51,7 @@ type CustomProvider struct {
 	Enabled             bool                  `json:"enabled"`
 	Headers             map[string]string     `json:"headers,omitempty"`
 	AllowPrivateNetwork bool                  `json:"allowPrivateNetwork,omitempty"`
+	ForceStream         bool                  `json:"forceStream,omitempty"`
 	Models              []CustomProviderModel `json:"models,omitempty"`
 	CreatedAt           time.Time             `json:"createdAt"`
 	UpdatedAt           time.Time             `json:"updatedAt"`
@@ -941,6 +942,7 @@ func customProviderAdminData() map[string]any {
 			"id": provider.ID, "name": provider.Name, "protocol": provider.Protocol,
 			"baseURL": provider.BaseURL, "enabled": provider.Enabled,
 			"allowPrivateNetwork": provider.AllowPrivateNetwork,
+			"forceStream":         provider.ForceStream,
 			"hasApiKey":           provider.APIKey != "", "keyPreview": customProviderKeyPreview(provider.APIKey),
 			"models":    provider.Models,
 			"createdAt": provider.CreatedAt, "updatedAt": provider.UpdatedAt,

@@ -812,6 +812,16 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
             </div>
             <div class="form-row">
               <div class="field">
+                <label for="providerForceStream">Responses 上游强制流式</label>
+                <select id="providerForceStream" name="forceStream" aria-describedby="providerForceStreamHelp">
+                  <option value="false">关闭</option>
+                  <option value="true">启用</option>
+                </select>
+                <div id="providerForceStreamHelp" class="provider-card-meta">非流式客户端也向 Responses 上游发送 stream:true，再汇总为非流式响应。</div>
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="field">
                 <label for="providerApiKey">API Key *</label>
                 <div class="provider-secret-row">
                   <input id="providerApiKey" name="apiKey" type="password" autocomplete="off" placeholder="编辑时留空表示保持原 Key" aria-describedby="providerApiKeyHelp">
@@ -1354,6 +1364,9 @@ const I18N = {
   '渠道名称 *': 'Provider Name *',
   '例如 OpenAI 主渠道': 'e.g. Primary OpenAI',
   '上游协议': 'Upstream Protocol',
+  'Responses 上游强制流式': 'Force streaming for Responses upstream',
+  '强制流式': 'Forced streaming',
+  '非流式客户端也向 Responses 上游发送 stream:true，再汇总为非流式响应。': 'Send stream:true to the Responses upstream even for non-streaming clients, then aggregate the result.',
   '私网访问': 'Private Network Access',
   '禁止（推荐）': 'Blocked (Recommended)',
   '允许私网 / 本机地址': 'Allow Private / Local Addresses',
@@ -2752,6 +2765,7 @@ function resetCustomProviderForm() {
   _('providerId').value = '';
   _('providerEnabled').value = 'true';
   _('providerProtocol').value = 'openai';
+  _('providerForceStream').value = 'false';
   _('providerAllowPrivateNetwork').value = 'false';
   _('providerApiKey').type = 'password';
   _('providerApiKey').placeholder = t('编辑时留空表示保持原 Key');
@@ -2809,7 +2823,7 @@ function renderCustomProviders() {
     return '<article class="provider-card">' +
       '<div class="provider-card-head">' +
         '<div><div class="provider-card-title">' + esc(provider.name) + '</div>' +
-          '<div class="provider-card-meta">' + esc(protocol) + ' · ' + esc(provider.baseURL) + '</div>' +
+          '<div class="provider-card-meta">' + esc(protocol + (provider.protocol === 'responses' && provider.forceStream ? ' · ' + t('强制流式') : '')) + ' · ' + esc(provider.baseURL) + '</div>' +
           '<div class="provider-card-meta">API Key: ' + esc(provider.keyPreview || '-') + ' · ' + t('上次同步') + ': ' + esc(lastSuccess) + '</div></div>' + status +
       '</div>' +
       (runtime.lastError ? '<div class="provider-runtime-error">' + esc(runtime.lastError) + '</div>' : '') +
@@ -2840,6 +2854,7 @@ function editCustomProvider(providerId) {
   _('providerId').value = provider.id;
   _('providerName').value = provider.name || '';
   _('providerProtocol').value = provider.protocol || 'openai';
+  _('providerForceStream').value = provider.forceStream ? 'true' : 'false';
   _('providerAllowPrivateNetwork').value = provider.allowPrivateNetwork ? 'true' : 'false';
   _('providerBaseURL').value = provider.baseURL || '';
   _('providerEnabled').value = provider.enabled ? 'true' : 'false';
@@ -2858,6 +2873,7 @@ async function saveCustomProvider(event) {
     id: _('providerId').value,
     name: _('providerName').value.trim(),
     protocol: _('providerProtocol').value,
+    forceStream: _('providerForceStream').value === 'true',
     allowPrivateNetwork: _('providerAllowPrivateNetwork').value === 'true',
     baseURL: _('providerBaseURL').value.trim(),
     apiKey: _('providerApiKey').value.trim(),

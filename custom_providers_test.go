@@ -429,3 +429,62 @@ func TestResponsesProviderAdapterNormalizesNonStreamAndStream(t *testing.T) {
 		}
 	}
 }
+
+func TestResponsesProviderRetriesStreamOnlyUpstreamForNonStreamClient(t *testing.T) {
+	isolateCustomProviderState(t)
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode request: %v", err)
+			return
+		}
+		if body["stream"] != true {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "Stream must be set to true", "type": "server_error", "code": "upstream_error"}})
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"upstream-model\"}}\n\n")
+		io.WriteString(w, "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"answer\"}\n\n")
+		io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":1}}}\n\n")
+	}))
+	defer server.Close()
+
+	provider := addTestCustomProvider(t, CustomProvider{
+		Name: "stream-only", Protocol: customProviderProtocolResponses,
+		BaseURL: server.URL, APIKey: "secret", Enabled: true, ForceStream: true,
+	}, []CustomProviderModel{{ID: "upstream-model", PublicID: "public-model", Enabled: true}})
+	if saved, ok := findCustomProvider(provider.ID); !ok || !saved.ForceStream {
+		t.Fatalf("provider forceStream setting not saved: %#v", saved)
+	}
+	if getNested(customProviderAdminData(), "providers", 0, "forceStream") != true {
+		t.Fatal("admin provider data omitted forceStream")
+	}
+	requestBody := `{"model":"public-model","max_tokens":32,"stream":false,"messages":[{"role":"user","content":"hello"}]}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(requestBody))
+	recorder := httptest.NewRecorder()
+	handleAnthropicMessages(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var result map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode Anthropic response: %v", err)
+	}
+	if calls.Load() != 1 || result["model"] != "public-model" || getNested(result, "content", 0, "text") != "answer" || getNested(result, "usage", "input_tokens") != float64(3) {
+		t.Fatalf("calls=%d response=%#v", calls.Load(), result)
+	}
+
+	provider.ForceStream = false
+	if _, err := upsertCustomProvider(provider); err != nil {
+		t.Fatalf("disable forceStream: %v", err)
+	}
+	calls.Store(0)
+	recorder = httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(requestBody))
+	handleAnthropicMessages(recorder, request)
+	if recorder.Code != http.StatusBadGateway || calls.Load() != 1 || !strings.Contains(recorder.Body.String(), "Stream must be set to true") {
+		t.Fatalf("disabled switch: calls=%d status=%d body=%s", calls.Load(), recorder.Code, recorder.Body.String())
+	}
+}

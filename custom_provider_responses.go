@@ -205,7 +205,8 @@ func responsesOutputToChat(response map[string]any) map[string]any {
 }
 
 func (responsesProviderAdapter) Chat(ctx context.Context, provider CustomProvider, params map[string]any, stream bool) (*http.Response, error) {
-	encoded, err := json.Marshal(chatToResponsesRequest(requestParamsWithoutInternalMetadata(params), stream))
+	upstreamStream := stream || provider.ForceStream
+	encoded, err := json.Marshal(chatToResponsesRequest(requestParamsWithoutInternalMetadata(params), upstreamStream))
 	if err != nil {
 		return nil, fmt.Errorf("encode Responses request: %w", err)
 	}
@@ -223,18 +224,28 @@ func (responsesProviderAdapter) Chat(ctx context.Context, provider CustomProvide
 		response.Body.Close()
 		return nil, newUpstreamHTTPError(response.StatusCode, string(body))
 	}
-	if stream {
-		return responsesStreamToChatResponse(response), nil
+	var chat map[string]any
+	if upstreamStream {
+		response = responsesStreamToChatResponse(response)
+		if stream {
+			return response, nil
+		}
+		chat, err = aggregateChatCompletionStream(response.Body)
+		response.Body.Close()
+	} else {
+		var object map[string]any
+		err = json.NewDecoder(response.Body).Decode(&object)
+		response.Body.Close()
+		if err == nil && (object["status"] == "failed" || object["error"] != nil) {
+			return nil, newUpstreamHTTPError(http.StatusBadGateway, fmt.Sprint(object["error"]))
+		}
+		if err == nil {
+			chat = responsesOutputToChat(object)
+		}
 	}
-	defer response.Body.Close()
-	var object map[string]any
-	if err := json.NewDecoder(response.Body).Decode(&object); err != nil {
+	if err != nil {
 		return nil, fmt.Errorf("decode Responses response: %w", err)
 	}
-	if object["status"] == "failed" || object["error"] != nil {
-		return nil, newUpstreamHTTPError(http.StatusBadGateway, fmt.Sprint(object["error"]))
-	}
-	chat := responsesOutputToChat(object)
 	result, err := json.Marshal(chat)
 	if err != nil {
 		return nil, err

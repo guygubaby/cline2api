@@ -100,6 +100,8 @@ For non-streaming lightweight auxiliary requests to DeepSeek V4 and GLM 5.3 (at 
 
 Custom providers can use OpenAI Chat Completions (`/chat/completions`), OpenAI Responses (`/responses`), or Anthropic Messages (`/messages`) upstream. Responses are normalized internally, so downstream clients may continue using Chat Completions, Responses, or Anthropic Messages.
 
+If a Responses upstream requires `stream: true`, enable "Force streaming for Responses upstream" on that provider. Non-streaming client requests are aggregated after the upstream stream completes; other providers are unaffected.
+
 ### API protocol compatibility
 
 | Protocol | Standard endpoint | Supported core calls |
