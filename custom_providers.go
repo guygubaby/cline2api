@@ -23,6 +23,7 @@ import (
 
 const (
 	customProviderProtocolOpenAI    = "openai"
+	customProviderProtocolResponses = "responses"
 	customProviderProtocolAnthropic = "anthropic"
 	customProviderMaxAttempts       = 2
 	customProviderRequestTimeout    = 15 * time.Second
@@ -73,6 +74,7 @@ type customProviderAdapter interface {
 }
 
 type openAIProviderAdapter struct{}
+type responsesProviderAdapter struct{}
 type anthropicProviderAdapter struct{}
 
 type customProviderRuntimeState struct {
@@ -297,7 +299,7 @@ func validateCustomProvider(provider CustomProvider, requireKey bool) error {
 	if provider.Name == "" {
 		return fmt.Errorf("provider name is required")
 	}
-	if provider.Protocol != customProviderProtocolOpenAI && provider.Protocol != customProviderProtocolAnthropic {
+	if provider.Protocol != customProviderProtocolOpenAI && provider.Protocol != customProviderProtocolResponses && provider.Protocol != customProviderProtocolAnthropic {
 		return fmt.Errorf("unsupported provider protocol %q", provider.Protocol)
 	}
 	parsed, err := url.Parse(strings.TrimSpace(provider.BaseURL))
@@ -440,6 +442,8 @@ func customProviderAdapterFor(protocol string) (customProviderAdapter, error) {
 	switch protocol {
 	case customProviderProtocolOpenAI:
 		return openAIProviderAdapter{}, nil
+	case customProviderProtocolResponses:
+		return responsesProviderAdapter{}, nil
 	case customProviderProtocolAnthropic:
 		return anthropicProviderAdapter{}, nil
 	default:
@@ -595,6 +599,10 @@ func (openAIProviderAdapter) ListModels(ctx context.Context, provider CustomProv
 	}
 	models, _, _, err := decodeDiscoveredModels(response)
 	return models, err
+}
+
+func (responsesProviderAdapter) ListModels(ctx context.Context, provider CustomProvider) ([]discoveredProviderModel, error) {
+	return openAIProviderAdapter{}.ListModels(ctx, provider)
 }
 
 func (anthropicProviderAdapter) ListModels(ctx context.Context, provider CustomProvider) ([]discoveredProviderModel, error) {

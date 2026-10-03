@@ -99,7 +99,7 @@ Model:    z-ai/glm-5.3-flash
 
 对 DeepSeek V4 和 GLM 5.3 的非流式轻量辅助请求（不超过 256 输出 token、无工具、未显式要求 thinking/reasoning），代理会关闭 thinking，避免标题或摘要任务把全部输出预算消耗在 reasoning。大任务、客户端流式请求和显式推理请求不受影响。
 
-OpenAI 渠道当前使用 `/chat/completions`，Anthropic 渠道使用 `/messages`；两种上游都会被归一化，因此下游仍可使用 Chat Completions、Responses 或 Anthropic Messages。
+自定义渠道可选择 OpenAI Chat Completions (`/chat/completions`)、OpenAI Responses (`/responses`) 或 Anthropic Messages (`/messages`) 作为上游协议。上游响应会归一化，因此下游仍可使用 Chat Completions、Responses 或 Anthropic Messages。
 
 ### API 协议兼容
 

@@ -342,3 +342,90 @@ func TestAnthropicProviderAdapterNormalizesNonStreamAndStream(t *testing.T) {
 		}
 	}
 }
+
+func TestResponsesProviderAdapterNormalizesNonStreamAndStream(t *testing.T) {
+	isolateCustomProviderState(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/responses" || r.Header.Get("Authorization") != "Bearer response-secret" {
+			t.Errorf("request path or auth: %s %#v", r.URL.Path, r.Header)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		var request map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode request: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if request["model"] != "upstream-response" || request["store"] != false || request["max_output_tokens"] != float64(32) {
+			t.Errorf("request fields: %#v", request)
+		}
+		if getNested(request, "tools", 0, "name") != "lookup" || getNested(request, "tool_choice", "name") != "lookup" {
+			t.Errorf("function mapping: %#v", request)
+		}
+		if getNested(request, "input", 0, "content") != "hello" || getNested(request, "input", 1, "call_id") != "call_old" || getNested(request, "input", 2, "output") != "done" {
+			t.Errorf("input mapping: %#v", request["input"])
+		}
+		if request["stream"] == false {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"id": "resp_1", "model": "upstream-response", "status": "completed", "created_at": 123,
+				"output": []any{
+					map[string]any{"type": "reasoning", "summary": []any{map[string]any{"type": "summary_text", "text": "thinking"}}},
+					map[string]any{"type": "message", "content": []any{map[string]any{"type": "output_text", "text": "answer"}}},
+					map[string]any{"type": "function_call", "call_id": "call_new", "name": "lookup", "arguments": `{"q":"a"}`},
+				},
+				"usage": map[string]any{"input_tokens": 10, "output_tokens": 4, "input_tokens_details": map[string]any{"cached_tokens": 3}},
+			})
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_2\",\"model\":\"upstream-response\",\"created_at\":123}}\n\n")
+		io.WriteString(w, "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\"}}\n\n")
+		io.WriteString(w, "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"streamed\"}\n\n")
+		io.WriteString(w, "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_new\",\"name\":\"lookup\"}}\n\n")
+		io.WriteString(w, "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":1,\"delta\":\"{\\\"q\\\":\\\"a\\\"}\"}\n\n")
+		io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}\n\n")
+	}))
+	defer server.Close()
+
+	addTestCustomProvider(t, CustomProvider{
+		Name: "responses", Protocol: customProviderProtocolResponses,
+		BaseURL: server.URL + "/v1", APIKey: "response-secret", Enabled: true,
+	}, []CustomProviderModel{{ID: "upstream-response", PublicID: "public-response", Enabled: true}})
+	params := map[string]any{
+		"model": "public-response", "max_tokens": 32,
+		"messages": []any{
+			map[string]any{"role": "user", "content": "hello"},
+			map[string]any{"role": "assistant", "tool_calls": []any{map[string]any{"id": "call_old", "type": "function", "function": map[string]any{"name": "lookup", "arguments": `{}`}}}},
+			map[string]any{"role": "tool", "tool_call_id": "call_old", "content": "done"},
+		},
+		"tools":       []any{map[string]any{"type": "function", "function": map[string]any{"name": "lookup", "parameters": map[string]any{"type": "object"}}}},
+		"tool_choice": map[string]any{"type": "function", "function": map[string]any{"name": "lookup"}},
+	}
+	response, _, _, err := callCustomProviderChat(context.Background(), params, false)
+	if err != nil {
+		t.Fatalf("non-stream call: %v", err)
+	}
+	var nonStream map[string]any
+	if err := json.NewDecoder(response.Body).Decode(&nonStream); err != nil {
+		t.Fatalf("decode non-stream: %v", err)
+	}
+	response.Body.Close()
+	if nonStream["model"] != "public-response" || getNested(nonStream, "choices", 0, "message", "content") != "answer" || getNested(nonStream, "choices", 0, "message", "reasoning_content") != "thinking" || getNested(nonStream, "choices", 0, "message", "tool_calls", 0, "id") != "call_new" || getNested(nonStream, "usage", "prompt_tokens_details", "cached_tokens") != float64(3) {
+		t.Fatalf("normalized non-stream: %#v", nonStream)
+	}
+	streamResponse, _, _, err := callCustomProviderChat(context.Background(), params, true)
+	if err != nil {
+		t.Fatalf("stream call: %v", err)
+	}
+	streamBody, err := io.ReadAll(streamResponse.Body)
+	streamResponse.Body.Close()
+	if err != nil {
+		t.Fatalf("read stream: %v", err)
+	}
+	for _, expected := range []string{"streamed", "public-response", "call_new", `"finish_reason":"tool_calls"`, `"prompt_tokens":10`, "data: [DONE]"} {
+		if !strings.Contains(string(streamBody), expected) {
+			t.Fatalf("stream missing %q: %s", expected, streamBody)
+		}
+	}
+}

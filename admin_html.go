@@ -760,7 +760,7 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
   <div class="page-header">
     <div>
       <div class="large-title">第三方渠道</div>
-      <div class="large-subtitle">接入 OpenAI Chat Completions 或 Anthropic Messages 风格的上游</div>
+      <div class="large-subtitle">接入 OpenAI Chat Completions、Responses 或 Anthropic Messages 风格的上游</div>
     </div>
     <button class="btn btn-sm" type="button" onclick="loadCustomProviders()">刷新</button>
   </div>
@@ -790,6 +790,7 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
                 <label for="providerProtocol">上游协议</label>
                 <select id="providerProtocol" name="protocol">
                   <option value="openai">OpenAI · Chat Completions</option>
+                  <option value="responses">OpenAI · Responses</option>
                   <option value="anthropic">Anthropic · Messages</option>
                 </select>
               </div>
@@ -806,7 +807,7 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
               <div class="field">
                 <label for="providerBaseURL">Base URL *</label>
                 <input id="providerBaseURL" name="baseURL" type="url" required autocomplete="url" placeholder="https://api.example.com/v1" aria-describedby="providerBaseURLHelp">
-                <div id="providerBaseURLHelp" class="provider-card-meta">系统会请求 /models、/chat/completions 或 /messages。</div>
+                <div id="providerBaseURLHelp" class="provider-card-meta">系统会请求 /models、/chat/completions、/responses 或 /messages。</div>
               </div>
             </div>
             <div class="form-row">
@@ -1347,7 +1348,7 @@ const I18N = {
   '模型展示列表已保存': 'Model listing saved',
   '模型展示列表已恢复为默认全部': 'Model listing restored to all models',
   '第三方渠道': 'Custom Providers',
-  '接入 OpenAI Chat Completions 或 Anthropic Messages 风格的上游': 'Connect OpenAI Chat Completions or Anthropic Messages compatible upstreams',
+  '接入 OpenAI Chat Completions、Responses 或 Anthropic Messages 风格的上游': 'Connect OpenAI Chat Completions, Responses, or Anthropic Messages compatible upstreams',
   '渠道配置': 'Provider Configuration',
   'Base URL 请填写到版本层级，例如 https://api.example.com/v1。API Key 只会写入本地配置文件。': 'Enter the version-level Base URL, such as https://api.example.com/v1. The API key is stored only in the local config file.',
   '渠道名称 *': 'Provider Name *',
@@ -1358,7 +1359,7 @@ const I18N = {
   '允许私网 / 本机地址': 'Allow Private / Local Addresses',
   '仅在上游明确部署于可信内网时开启。': 'Enable only for an upstream deployed on a trusted private network.',
   '渠道配置尚未保存，确定离开？': 'Provider changes are unsaved. Leave anyway?',
-  '系统会请求 /models、/chat/completions 或 /messages。': 'The proxy calls /models, /chat/completions, or /messages.',
+  '系统会请求 /models、/chat/completions、/responses 或 /messages。': 'The proxy calls /models, /chat/completions, /responses, or /messages.',
   '编辑时留空表示保持原 Key': 'Leave empty while editing to keep the current key',
   '显示': 'Show',
   '隐藏': 'Hide',
@@ -2780,7 +2781,7 @@ function renderCustomProviders() {
     const models = provider.models || [];
     const runtime = provider.runtime || {};
     const latencies = runtime.latencies || {};
-    const protocol = provider.protocol === 'anthropic' ? 'Anthropic · Messages' : 'OpenAI · Chat Completions';
+    const protocol = provider.protocol === 'anthropic' ? 'Anthropic · Messages' : provider.protocol === 'responses' ? 'OpenAI · Responses' : 'OpenAI · Chat Completions';
     const status = provider.enabled
       ? '<span class="status active"><span class="status-dot active"></span>' + t('启用') + '</span>'
       : '<span class="status expired"><span class="status-dot expired"></span>' + t('停用') + '</span>';
