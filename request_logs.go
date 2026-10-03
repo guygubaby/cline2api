@@ -381,7 +381,7 @@ func finalizeRequestLog(entry *RequestLog, usage tokenUsage, firstOutputAt time.
 	entry.FinishedAt = time.Now()
 	entry.DurationMs = entry.FinishedAt.Sub(startedAt).Milliseconds()
 	entry.Completed = completed
-	entry.Error = truncate(errMsg, 200)
+	entry.Error = truncate(errMsg, 4096)
 
 	if usage.Valid {
 		entry.UsageAvailable = true

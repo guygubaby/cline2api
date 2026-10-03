@@ -196,6 +196,18 @@ tbody tr:hover{background:var(--surface2)}
 .latency-phases strong{color:var(--text);font-weight:600}
 .log-status.ok{background:var(--green-soft);color:var(--green)}
 .log-status.fail{background:var(--red-soft);color:var(--red)}
+.log-detail-trigger{display:block;margin-top:2px;padding:6px 0;border:0;background:none;color:var(--accent);font:inherit;font-size:12px;cursor:pointer;text-align:left}
+.log-detail-trigger:hover{text-decoration:underline}
+@media (max-width:760px){.log-detail-trigger{min-height:44px;padding:10px 0}}
+.log-detail-dialog{width:min(640px,calc(100vw - 24px));max-height:calc(100dvh - 32px);overflow:auto;margin:auto;padding:20px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--surface);color:var(--text);box-shadow:var(--shadow-lg)}
+.log-detail-dialog::backdrop{background:rgba(15,23,42,0.45)}
+.log-detail-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:16px}
+.log-detail-meta{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 16px;margin-bottom:16px;font-size:12px}
+.log-detail-meta dt{color:var(--text2)}
+.log-detail-meta dd{overflow-wrap:anywhere}
+.log-detail-dialog h3{margin-bottom:8px;font-size:13px}
+.log-detail-dialog pre{max-height:45vh;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;padding:12px;background:var(--surface2);border:1px solid var(--border2);border-radius:var(--radius-sm);font-size:12px}
+@media (max-width:520px){.log-detail-meta{grid-template-columns:1fr}}
 
 /* ===== Status badges ===== */
 .status{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:12px;font-size:12px;font-weight:600}
@@ -717,6 +729,16 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
     <button class="btn btn-primary" onclick="loadRequestLogs(false)">加载更多</button>
   </div>
 </div>
+
+<dialog id="logDetailDialog" class="log-detail-dialog" aria-labelledby="logDetailTitle">
+  <div class="log-detail-head">
+    <h2 id="logDetailTitle">请求详情</h2>
+    <form method="dialog"><button type="submit" class="btn btn-sm">关闭</button></form>
+  </div>
+  <dl id="logDetailMeta" class="log-detail-meta"></dl>
+  <h3>错误详情</h3>
+  <pre tabindex="0"><code id="logDetailError"></code></pre>
+</dialog>
 
 <div id="tab-model-visibility" class="tab-panel" style="display:none">
   <div class="page-header">
@@ -1265,6 +1287,12 @@ const I18N = {
   '导入账号': 'Import',
   '请求日志': 'Request Logs',
   '请求性能日志': 'Request performance logs',
+  '请求详情': 'Request details',
+  '错误详情': 'Error details',
+  '请求 ID': 'Request ID',
+  '错误代码': 'Error code',
+  '未记录错误信息': 'No error message recorded',
+  '详情': 'Details',
   '模型展示': 'Model Listing',
   '渠道管理': 'Providers',
   '设置': 'Settings',
@@ -3232,6 +3260,7 @@ async function loadConfig() {
 // ========== 请求日志 ==========
 let logCursor = '';
 let logHasMore = false;
+const logEntries = new Map();
 
 const formatDuration = ms => {
   if (!ms || ms <= 0) return '-';
@@ -3267,8 +3296,31 @@ const formatLogDiagnostic = l => {
   if (l.reasoningChars) parts.push('reasoning_chars=' + l.reasoningChars);
   if (l.thinkingTokens) parts.push('thinking_tokens=' + l.thinkingTokens);
   if (l.retrySuppressed) parts.push('retry_suppressed=true');
-  return parts.join(' · ');
+  return parts.join('\n');
 };
+
+function showRequestLogDetail(id) {
+  const l = logEntries.get(id);
+  if (!l) return;
+  const fields = [
+    [t('请求 ID'), l.id],
+    [t('时间'), l.startedAt ? new Date(l.startedAt).toLocaleString(LC()) : '-'],
+    [t('账号 / 渠道'), l.accountEmail || l.upstream || '-'],
+    [t('协议'), l.protocol || '-'],
+    [t('模型'), l.model || '-'],
+    [t('错误代码'), l.errorCode || '-'],
+  ];
+  _('logDetailMeta').innerHTML = fields.map(([label, value]) =>
+    '<div><dt>' + esc(label) + '</dt><dd>' + esc(String(value)) + '</dd></div>'
+  ).join('');
+  _('logDetailError').textContent = formatLogDiagnostic(l) || t('未记录错误信息');
+  _('logDetailDialog').showModal();
+}
+
+_('tab-logs').addEventListener('click', event => {
+  const button = event.target.closest('[data-log-detail]');
+  if (button) showRequestLogDetail(button.dataset.logDetail);
+});
 
 async function loadRequestLogs(reset) {
   if (reset) logCursor = '';
@@ -3278,6 +3330,8 @@ async function loadRequestLogs(reset) {
     const d = await api('GET', path);
     const page = d.data;
     const items = page.items || [];
+    if (reset) logEntries.clear();
+    items.forEach(item => logEntries.set(item.id, item));
     logHasMore = !!page.hasMore;
     logCursor = page.nextCursor || '';
     _('logLoadMore').style.display = logHasMore ? 'block' : 'none';
@@ -3292,10 +3346,10 @@ async function loadRequestLogs(reset) {
 
     const renderRow = l => {
       const ts = l.startedAt ? new Date(l.startedAt).toLocaleString(LC()) : '-';
-      const diagnostic = formatLogDiagnostic(l);
       const st = l.completed
         ? '<span class="log-status ok">' + t('完成') + '</span>'
-        : '<span class="log-status fail" title="' + escAttr(diagnostic) + '" aria-label="' + escAttr(t('失败') + (diagnostic ? ': ' + diagnostic : '')) + '">' + t('失败') + '</span>';
+        : '<span class="log-status fail">' + t('失败') + '</span>' +
+          '<button type="button" class="log-detail-trigger" data-log-detail="' + escAttr(l.id) + '">' + t('详情') + '</button>';
       return '<tr>' +
         '<td class="mono" style="font-size:11px">' + ts + '</td>' +
         '<td>' + esc(l.accountEmail || l.upstream || '-') + '</td>' +
@@ -3313,12 +3367,12 @@ async function loadRequestLogs(reset) {
     const renderCard = l => {
       const ts = l.startedAt ? new Date(l.startedAt).toLocaleString(LC()) : '-';
       const st = l.completed ? t('完成') : t('失败');
-      const diagnostic = formatLogDiagnostic(l);
+      const detail = l.completed ? '' : '<button type="button" class="log-detail-trigger" data-log-detail="' + escAttr(l.id) + '">' + t('详情') + '</button>';
       const tk = l.usageAvailable
         ? t('输入 ') + formatTokenCount(l.inputTokens) + t(' · 输出 ') + formatTokenCount(l.outputTokens) + t(' · 缓存 ') + formatCacheState(l) + t(' · 总 ') + formatTokenCount(l.totalTokens)
         : t('Token 未知');
       return '<article class="account-card">' +
-        '<div class="account-card-header"><span class="account-email">' + esc(l.accountEmail || l.upstream || '-') + '</span><span class="log-status ' + (l.completed ? 'ok' : 'fail') + '" title="' + escAttr(diagnostic) + '" aria-label="' + escAttr(st + (diagnostic ? ': ' + diagnostic : '')) + '">' + st + '</span></div>' +
+        '<div class="account-card-header"><span class="account-email">' + esc(l.accountEmail || l.upstream || '-') + '</span><div><span class="log-status ' + (l.completed ? 'ok' : 'fail') + '">' + st + '</span>' + detail + '</div></div>' +
         '<div class="account-metrics">' +
           '<div class="account-metric"><span class="account-metric-label">' + t('协议') + '</span><span class="account-metric-value">' + esc(l.protocol || '-') + '</span></div>' +
           '<div class="account-metric"><span class="account-metric-label">' + t('耗时') + '</span><span class="account-metric-value">' + formatDuration(l.durationMs) + '</span></div>' +
