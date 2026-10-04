@@ -18,7 +18,7 @@ func main() {
 	loginMode := flag.Bool("login", false, "Run OAuth device login flow and add account to pool")
 	captureMode := flag.Bool("capture", false, "Run interactive OAuth capture (records ALL traffic)")
 	port := flag.Int("port", 3457, "Proxy server port")
-	host := flag.String("host", configuredHost(), "Proxy server listen host (0.0.0.0 = all interfaces)")
+	host := flag.String("host", "", "Proxy server listen host (0.0.0.0 = all interfaces)")
 	addAccount := flag.Bool("add-account", false, "Add a new account via OAuth to the pool")
 	showList := flag.Bool("list", false, "List all accounts in the pool")
 	startMode := flag.Bool("start", false, "Build, start proxy, and open admin panel in browser")
@@ -27,6 +27,9 @@ func main() {
 	if *startMode {
 		buildAndStart(*host, *port)
 		return
+	}
+	if err := initAuthStore(); err != nil {
+		log.Fatalf("Storage initialization failed: %v", err)
 	}
 
 	if *captureMode {

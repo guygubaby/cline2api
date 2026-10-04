@@ -1,15 +1,16 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -51,10 +52,8 @@ func writeAPI(w http.ResponseWriter, status int, resp apiResponse) {
 	json.NewEncoder(w).Encode(resp)
 }
 
-// 管理后台登录会话（内存态，程序重启后需重新登录）。
+// Limit concurrent login attempts; sessions are stored in PostgreSQL.
 var (
-	adminSessions   = make(map[string]time.Time)
-	adminSessionsMu sync.Mutex
 	adminLoginSlots = make(chan struct{}, 2)
 )
 
@@ -62,7 +61,6 @@ const (
 	adminSessionCookie             = "cline_admin_session"
 	adminSessionTTL                = 24 * time.Hour
 	adminPasswordEnv               = "CLINE_ADMIN_PASSWORD"
-	allowInsecureAdminEnv          = "CLINE_ALLOW_INSECURE_ADMIN"
 	adminPasswordHashPrefix        = "argon2id$"
 	maxAdminRequestBodyBytes int64 = 16 << 20
 )
@@ -70,12 +68,15 @@ const (
 func registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/", adminStaticHandler)
 	// 无需登录的接口
-	mux.HandleFunc("/admin/api/login", adminOriginGuard(handleAdminLogin))
-	mux.HandleFunc("/admin/api/logout", adminOriginGuard(handleAdminLogout))
-	// 其余 API 全部需要后台鉴权（设置了密码后）
+	mux.HandleFunc("/admin/api/login", adminOriginGuard(handleAuthLogin))
+	mux.HandleFunc("/admin/api/logout", adminOriginGuard(handleAuthLogout))
+	// All other admin APIs require a database-backed session.
 	auth := func(h http.HandlerFunc) http.HandlerFunc {
 		return adminOriginGuard(requireAdminAuth(h))
 	}
+	mux.HandleFunc("/admin/api/me", auth(handleAuthMe))
+	mux.HandleFunc("/admin/api/users", auth(handleAdminUsers))
+	mux.HandleFunc("/admin/api/users/status", auth(handleAdminUserStatus))
 	mux.HandleFunc("/admin/api/accounts", auth(handleAdminAccounts))
 	mux.HandleFunc("/admin/api/accounts/add", auth(handleAdminAccountAdd))
 	mux.HandleFunc("/admin/api/accounts/delete", auth(handleAdminAccountDelete))
@@ -89,9 +90,9 @@ func registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/api/accounts/delete-all", auth(handleAdminDeleteAll))
 	mux.HandleFunc("/admin/api/accounts/reset", auth(handleAdminAccountReset))
 	mux.HandleFunc("/admin/api/accounts/test", auth(handleAdminAccountTest))
-	mux.HandleFunc("/admin/api/keys", auth(handleAdminGetKeys))
-	mux.HandleFunc("/admin/api/keys/generate", auth(handleAdminGenerateKey))
-	mux.HandleFunc("/admin/api/keys/delete", auth(handleAdminDeleteKey))
+	mux.HandleFunc("/admin/api/keys", auth(handleManagedKeysList))
+	mux.HandleFunc("/admin/api/keys/generate", auth(handleManagedKeyCreate))
+	mux.HandleFunc("/admin/api/keys/delete", auth(handleManagedKeyRevoke))
 	mux.HandleFunc("/admin/api/models", auth(handleAdminModels))
 	mux.HandleFunc("/admin/api/models/visibility", auth(handleAdminModelVisibility))
 	mux.HandleFunc("/admin/api/models/sync", auth(handleAdminModelSync))
@@ -111,26 +112,9 @@ func registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/api/providers/strategy", auth(handleAdminProviderStrategy))
 	mux.HandleFunc("/admin/api/config", auth(handleAdminConfig))
 	mux.HandleFunc("/admin/api/config/update", auth(handleAdminUpdateConfig))
-	mux.HandleFunc("/admin/api/password", auth(handleAdminPassword))
+	mux.HandleFunc("/admin/api/password", auth(handleAuthPassword))
 	mux.HandleFunc("/admin/api/request-logs", auth(handleAdminRequestLogs))
 	mux.HandleFunc("/admin/api/open-external", auth(handleOpenExternal))
-}
-
-func configureAdminPasswordFromEnvironment() {
-	if adminPasswordConfigured() {
-		return
-	}
-	if password := os.Getenv(adminPasswordEnv); password != "" {
-		setAdminPassword(password)
-	}
-}
-
-func adminPasswordConfigured() bool {
-	p := loadPool()
-	poolMu.Lock()
-	configured := p.AdminPasswordHash != ""
-	poolMu.Unlock()
-	return configured
 }
 
 func adminOriginAllowed(r *http.Request) bool {
@@ -169,48 +153,19 @@ func adminOriginGuard(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-func localAdminRequest(r *http.Request) bool {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
-	}
-	ip := net.ParseIP(strings.Trim(host, "[]"))
-	return ip != nil && ip.IsLoopback()
-}
-
-func insecureRemoteAdminAllowed() bool {
-	value := strings.TrimSpace(strings.ToLower(os.Getenv(allowInsecureAdminEnv)))
-	return value == "1" || value == "true" || value == "yes"
-}
-
-// requireAdminAuth 后台访问鉴权中间件：未设置密码直接放行，否则校验会话 cookie。
+// requireAdminAuth validates an opaque database-backed admin session.
 func requireAdminAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !adminPasswordConfigured() {
-			if !localAdminRequest(r) && !insecureRemoteAdminAllowed() {
-				writeAPI(w, http.StatusForbidden, apiResponse{Error: "remote admin access requires CLINE_ADMIN_PASSWORD"})
-				return
-			}
-			next(w, r)
-			return
-		}
-		c, err := r.Cookie(adminSessionCookie)
+		user, err := lookupAdminSession(r)
 		if err != nil {
-			writeAPI(w, http.StatusUnauthorized, apiResponse{Error: tAPI(r, "login_required")})
+			if !errors.Is(err, sql.ErrNoRows) {
+				writeAPI(w, http.StatusServiceUnavailable, apiResponse{Error: "auth database unavailable"})
+			} else {
+				writeAPI(w, http.StatusUnauthorized, apiResponse{Error: tAPI(r, "login_required")})
+			}
 			return
 		}
-		adminSessionsMu.Lock()
-		expiry, ok := adminSessions[c.Value]
-		if ok {
-			if time.Now().Before(expiry) {
-				adminSessionsMu.Unlock()
-				next(w, r)
-				return
-			}
-			delete(adminSessions, c.Value)
-		}
-		adminSessionsMu.Unlock()
-		writeAPI(w, http.StatusUnauthorized, apiResponse{Error: tAPI(r, "session_expired")})
+		next(w, r.WithContext(context.WithValue(r.Context(), adminUserContextKey{}, user)))
 	}
 }
 
@@ -229,50 +184,6 @@ func hashAdminPassword(saltHex, password string) string {
 	return adminPasswordHashPrefix + hex.EncodeToString(derived)
 }
 
-// setAdminPassword 设置/修改/清除后台密码（空 = 清除），并清空所有会话强制重新登录。
-func setAdminPassword(password string) {
-	saltHex := ""
-	hashValue := ""
-	if password != "" {
-		salt := secureRandomBytes(16)
-		saltHex = hex.EncodeToString(salt)
-		hashValue = hashAdminPassword(saltHex, password)
-	}
-	p := loadPool()
-	poolMu.Lock()
-	if password == "" {
-		p.AdminPasswordHash = ""
-		p.AdminPasswordSalt = ""
-	} else {
-		p.AdminPasswordSalt = saltHex
-		p.AdminPasswordHash = hashValue
-	}
-	poolMu.Unlock()
-	savePool()
-	adminSessionsMu.Lock()
-	adminSessions = make(map[string]time.Time)
-	adminSessionsMu.Unlock()
-}
-
-// verifyAdminPassword 校验后台密码（未设置密码时返回 false）。
-func verifyAdminPassword(password string) bool {
-	p := loadPool()
-	poolMu.Lock()
-	hash := p.AdminPasswordHash
-	salt := p.AdminPasswordSalt
-	poolMu.Unlock()
-	if hash == "" {
-		return false
-	}
-	var candidate string
-	if strings.HasPrefix(hash, adminPasswordHashPrefix) {
-		candidate = hashAdminPassword(salt, password)
-	} else {
-		candidate = legacyAdminPasswordHash(salt, password)
-	}
-	return subtle.ConstantTimeCompare([]byte(candidate), []byte(hash)) == 1
-}
-
 // randomHex 生成 n 字节随机数的 hex 字符串。
 func randomHex(n int) string {
 	b := make([]byte, n)
@@ -280,116 +191,6 @@ func randomHex(n int) string {
 		return ""
 	}
 	return hex.EncodeToString(b)
-}
-
-// POST /admin/api/login  body: {password}
-func handleAdminLogin(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
-		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
-		return
-	}
-	select {
-	case adminLoginSlots <- struct{}{}:
-		defer func() { <-adminLoginSlots }()
-	default:
-		writeAPI(w, http.StatusTooManyRequests, apiResponse{Error: "too many login attempts"})
-		return
-	}
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
-		return
-	}
-	defer r.Body.Close()
-	var req struct {
-		Password string `json:"password"`
-	}
-	if err := json.Unmarshal(body, &req); err != nil {
-		writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_json")})
-		return
-	}
-	if !adminPasswordConfigured() {
-		writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "password_not_enabled")})
-		return
-	}
-	if !verifyAdminPassword(req.Password) {
-		time.Sleep(500 * time.Millisecond) // 防爆破
-		writeAPI(w, http.StatusUnauthorized, apiResponse{Error: tAPI(r, "wrong_password")})
-		return
-	}
-	p := loadPool()
-	poolMu.Lock()
-	legacyHash := !strings.HasPrefix(p.AdminPasswordHash, adminPasswordHashPrefix)
-	poolMu.Unlock()
-	if legacyHash {
-		setAdminPassword(req.Password)
-	}
-	token := randomHex(32)
-	adminSessionsMu.Lock()
-	adminSessions[token] = time.Now().Add(adminSessionTTL)
-	adminSessionsMu.Unlock()
-	http.SetCookie(w, &http.Cookie{
-		Name:     adminSessionCookie,
-		Value:    token,
-		Path:     "/admin",
-		HttpOnly: true,
-		Secure:   r.TLS != nil,
-		SameSite: http.SameSiteStrictMode,
-		MaxAge:   int(adminSessionTTL.Seconds()),
-	})
-	writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: tAPI(r, "login_ok")})
-}
-
-// POST /admin/api/logout
-func handleAdminLogout(w http.ResponseWriter, r *http.Request) {
-	if c, err := r.Cookie(adminSessionCookie); err == nil {
-		adminSessionsMu.Lock()
-		delete(adminSessions, c.Value)
-		adminSessionsMu.Unlock()
-	}
-	http.SetCookie(w, &http.Cookie{Name: adminSessionCookie, Value: "", Path: "/admin", MaxAge: -1})
-	writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: tAPI(r, "logout_ok")})
-}
-
-// POST /admin/api/password  body: {password}（空 = 清除密码，恢复无密码访问）
-func handleAdminPassword(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
-		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
-		return
-	}
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
-		return
-	}
-	defer r.Body.Close()
-	var req struct {
-		Password string `json:"password"`
-	}
-	if err := json.Unmarshal(body, &req); err != nil {
-		writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_json")})
-		return
-	}
-	setAdminPassword(req.Password)
-	if req.Password == "" {
-		writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: tAPI(r, "password_cleared")})
-	} else {
-		writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: tAPI(r, "password_updated")})
-	}
-}
-
-func adminStaticHandler(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path == "/admin/" || r.URL.Path == "/admin" {
-		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("X-Frame-Options", "DENY")
-		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(adminHTML))
-		return
-	}
-	http.NotFound(w, r)
 }
 
 // GET /admin/api/accounts
@@ -1086,7 +887,7 @@ func configuredProxyConfigPath() string {
 
 func loadProxyConfigFromPath(path string) *proxyConfigData {
 	cfg := defaultProxyConfig()
-	data, err := os.ReadFile(path)
+	data, err := readStateFile(path)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			log.Printf("proxy config read failed: %v", err)
@@ -1141,59 +942,6 @@ func setProxyConfig(c *proxyConfigData) error {
 	return nil
 }
 
-// GET /admin/api/keys
-func handleAdminGetKeys(w http.ResponseWriter, r *http.Request) {
-	p := loadPool()
-	writeAPI(w, http.StatusOK, apiResponse{Success: true, Data: map[string]any{"keys": p.Keys}})
-}
-
-// POST /admin/api/keys/generate
-func handleAdminGenerateKey(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
-		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
-		return
-	}
-	key := fmt.Sprintf("cline_%x_%x", time.Now().UnixMilli(), time.Now().UnixNano()%1000000)
-	p := loadPool()
-	poolMu.Lock()
-	p.Keys = append(p.Keys, key)
-	poolMu.Unlock()
-	savePool()
-	writeAPI(w, http.StatusOK, apiResponse{Success: true, Data: map[string]any{"key": key}})
-}
-
-// POST /admin/api/keys/delete  body: { key }
-func handleAdminDeleteKey(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
-		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
-		return
-	}
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
-		return
-	}
-	defer r.Body.Close()
-	var req struct {
-		Key string `json:"key"`
-	}
-	if err := json.Unmarshal(body, &req); err != nil {
-		writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_json")})
-		return
-	}
-	p := loadPool()
-	poolMu.Lock()
-	for i, k := range p.Keys {
-		if k == req.Key {
-			p.Keys = append(p.Keys[:i], p.Keys[i+1:]...)
-			break
-		}
-	}
-	poolMu.Unlock()
-	savePool()
-	writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: tAPI(r, "key_deleted")})
-}
-
 // GET /admin/api/config
 func handleAdminConfig(w http.ResponseWriter, r *http.Request) {
 	cfg := getProxyConfig()
@@ -1202,12 +950,12 @@ func handleAdminConfig(w http.ResponseWriter, r *http.Request) {
 		"host":            listenHost,
 		"strategy":        cfg.Strategy,
 		"version":         appVersion,
-		"poolPath":        poolPath,
+		"poolPath":        "PostgreSQL",
 		"defaultModel":    getDefaultModel(),
 		"anthropicEffort": configuredAnthropicEffort(),
 		"headers":         cfg.Headers,
 		"localIPs":        detectLocalIPs(),
-		"hasPassword":     adminPasswordConfigured(),
+		"hasPassword":     true,
 	}})
 }
 
@@ -1757,6 +1505,12 @@ func handleAdminStats(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	now := time.Now()
+	periodUsage := summarizeRequestUsage(now, period, timezoneOffsetMinutes)
+	todayUsage := periodUsage
+	if period != "today" {
+		todayUsage = summarizeRequestUsage(now, "today", timezoneOffsetMinutes)
+	}
 	writeAPI(w, http.StatusOK, apiResponse{
 		Success: true,
 		Data: map[string]any{
@@ -1769,7 +1523,8 @@ func handleAdminStats(w http.ResponseWriter, r *http.Request) {
 			"completionTokens": completionTokens,
 			"totalTokens":      totalTokens,
 			"cachedTokens":     cachedTokens,
-			"periodUsage":      summarizeRequestUsage(time.Now(), period, timezoneOffsetMinutes),
+			"periodUsage":      periodUsage,
+			"todayUsage":       todayUsage,
 			"strategy":         getProxyConfig().Strategy,
 			"version":          appVersion,
 			// opencode zen 免费模型今日用量（从请求日志聚合）

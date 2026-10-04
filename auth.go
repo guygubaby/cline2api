@@ -101,7 +101,7 @@ func fileExists(p string) bool {
 }
 
 func loadCredentials() *credentials {
-	data, err := os.ReadFile(credentialsPath)
+	data, err := readStateFile(credentialsPath)
 	if err != nil {
 		return nil
 	}
@@ -123,7 +123,9 @@ func saveCredentials(rt string) {
 		log.Printf("Failed to save credentials: %v", err)
 		return
 	}
-	log.Printf("Credentials saved to %s", credentialsPath)
+	if stateDB == nil {
+		log.Printf("Credentials saved to %s", credentialsPath)
+	}
 }
 
 func workosDeviceAuth() (*deviceAuthResp, error) {

@@ -83,6 +83,9 @@ func writeAndSyncFile(path string, data []byte, mode os.FileMode) error {
 // rename over a file bind mount, so that path falls back to a synced direct
 // write and remembers the limitation for subsequent saves.
 func writeFileDurably(path string, data []byte, mode os.FileMode) error {
+	if managed, err := writeStateFile(path, data); managed {
+		return err
+	}
 	if _, direct := directWritePaths.Load(path); direct {
 		return writeAndSyncFile(path, data, mode)
 	}

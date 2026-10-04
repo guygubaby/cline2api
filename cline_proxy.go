@@ -88,7 +88,7 @@ func cloneClineProxyConfig(config *clineProxyConfigData) *clineProxyConfigData {
 
 func loadClineProxyConfig() *clineProxyConfigData {
 	config := defaultClineProxyConfig()
-	data, err := os.ReadFile(clineProxyConfigPath())
+	data, err := readStateFile(clineProxyConfigPath())
 	if err != nil {
 		if !os.IsNotExist(err) {
 			log.Printf("cline proxy config read failed: %v", err)

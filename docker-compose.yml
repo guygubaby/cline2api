@@ -1,8 +1,25 @@
 services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: cline
+      POSTGRES_USER: cline
+      POSTGRES_PASSWORD: ${CLINE_DB_PASSWORD:?Set CLINE_DB_PASSWORD in .env}
+    volumes:
+      - auth-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cline -d cline"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
   cline-proxy:
     build: .
     container_name: cline-proxy
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "4000:3457"
     volumes:
@@ -21,6 +38,11 @@ services:
         target: /app/.cline-zen.json
         bind:
           create_host_path: false
+      - type: bind
+        source: ./.cline-credentials.json
+        target: /app/.cline-credentials.json
+        bind:
+          create_host_path: false
       - type: volume
         source: provider-data
         target: /app/provider-data
@@ -34,14 +56,16 @@ services:
         bind:
           create_host_path: false
     environment:
-      - PORT=4000
       - CLINE_PROXY_HOST=0.0.0.0
       - CLINE_ADMIN_PASSWORD=${CLINE_ADMIN_PASSWORD:-}
-      - CLINE_ALLOW_INSECURE_ADMIN=${CLINE_ALLOW_INSECURE_ADMIN:-false}
+      - CLINE_ADMIN_EMAIL=${CLINE_ADMIN_EMAIL:-admin@local.test}
+      - CLINE_DATABASE_URL=postgres://cline:${CLINE_DB_PASSWORD}@postgres:5432/cline?sslmode=disable
+      - CLINE_ADMIN_SECURE_COOKIE=${CLINE_ADMIN_SECURE_COOKIE:-false}
       - CLINE_PROVIDERS_PATH=/app/provider-data/.cline-providers.json
       - CLINE_CONFIG_PATH=/app/config-data/.cline-config.json
       - CLINE_EGRESS_PROXY_CONFIG_PATH=/app/config-data/.cline-proxy.json
 
 volumes:
+  auth-db:
   provider-data:
   config-data:

@@ -243,7 +243,7 @@ func loadCustomProviderStore() *customProviderStoreData {
 		return customProviderStore
 	}
 	store := defaultCustomProviderStore()
-	if data, err := os.ReadFile(customProvidersPath); err == nil {
+	if data, err := readStateFile(customProvidersPath); err == nil {
 		if err := json.Unmarshal(data, store); err != nil {
 			log.Printf("custom providers parse failed: %v", err)
 		}

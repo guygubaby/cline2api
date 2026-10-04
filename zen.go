@@ -13,7 +13,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -325,7 +324,7 @@ func getZenConfig() *zenConfigData {
 	defer zenConfigMu.Unlock()
 	if zenConfig == nil {
 		cfg := defaultZenConfig()
-		if data, err := os.ReadFile(resolveDataPath(".cline-zen.json")); err == nil {
+		if data, err := readStateFile(resolveDataPath(".cline-zen.json")); err == nil {
 			if err := json.Unmarshal(data, cfg); err != nil {
 				log.Printf("zen config parse failed: %v", err)
 			}

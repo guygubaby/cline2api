@@ -132,8 +132,8 @@ func TestTenantScopeNamespacesSharedStateAndClientCacheKeys(t *testing.T) {
 }
 
 func TestUnauthenticatedRequestsDoNotShareTenantState(t *testing.T) {
-	first := requestWithTenantScope(httptest.NewRequest("GET", "/", nil), "")
-	second := requestWithTenantScope(httptest.NewRequest("GET", "/", nil), "")
+	first := requestWithTenantScope(httptest.NewRequest("GET", "/", nil), "", apiKeyIdentity{})
+	second := requestWithTenantScope(httptest.NewRequest("GET", "/", nil), "", apiKeyIdentity{})
 	if requestTenantScope(first) == requestTenantScope(second) {
 		t.Fatal("unauthenticated requests unexpectedly share a tenant scope")
 	}
@@ -206,7 +206,7 @@ func TestRequestLogIsolationMetadataTracksFinalAttempt(t *testing.T) {
 	}
 	recordUpstreamAttempt(params, "sess_first")
 	recordUpstreamAttempt(params, "sess_second")
-	entry := newRequestLog("anthropic", "deepseek/deepseek-v4-flash", true)
+	entry := newRequestLog("anthropic", "deepseek/deepseek-v4-flash", true, nil)
 	setRequestLogIsolationMetadata(&entry, params)
 	if entry.UpstreamTaskID != "sess_second" || entry.RetryCount != 1 || len(entry.RequestHMAC) != 64 {
 		t.Fatalf("isolation metadata = %#v", entry)

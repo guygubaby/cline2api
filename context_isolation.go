@@ -43,6 +43,8 @@ func proxyRequestContext(params map[string]any) context.Context {
 }
 
 type tenantScopeContextKey struct{}
+type apiKeyPreviewContextKey struct{}
+type apiKeyIdentityContextKey struct{}
 
 var auditHMACKey = secureRandomBytes(32)
 
@@ -74,14 +76,44 @@ func tenantScopeForAPIKey(apiKey string) string {
 	return hex.EncodeToString(sum[:16])
 }
 
-func requestWithTenantScope(request *http.Request, apiKey string) *http.Request {
+func requestWithTenantScope(request *http.Request, apiKey string, identity apiKeyIdentity) *http.Request {
 	scope := tenantScopeForAPIKey(apiKey)
+	preview := maskedAPIKeyPreview(apiKey)
 	if apiKey == "" {
 		// Without authentication there is no stable tenant boundary. Fail closed by
 		// disabling cross-request shared state instead of treating all callers as one tenant.
 		scope = "anonymous-request-" + secureRandomHex(16)
 	}
-	return request.WithContext(context.WithValue(request.Context(), tenantScopeContextKey{}, scope))
+	ctx := context.WithValue(request.Context(), tenantScopeContextKey{}, scope)
+	ctx = context.WithValue(ctx, apiKeyPreviewContextKey{}, preview)
+	return request.WithContext(context.WithValue(ctx, apiKeyIdentityContextKey{}, identity))
+}
+
+func maskedAPIKeyPreview(apiKey string) string {
+	if apiKey == "" {
+		return "anonymous"
+	}
+	runes := []rune(apiKey)
+	if len(runes) > 8 {
+		return "••••" + string(runes[len(runes)-4:])
+	}
+	return "••••"
+}
+
+func requestAPIKeyPreview(request *http.Request) string {
+	if request == nil {
+		return ""
+	}
+	preview, _ := request.Context().Value(apiKeyPreviewContextKey{}).(string)
+	return preview
+}
+
+func requestAPIKeyIdentity(request *http.Request) apiKeyIdentity {
+	if request == nil {
+		return apiKeyIdentity{}
+	}
+	identity, _ := request.Context().Value(apiKeyIdentityContextKey{}).(apiKeyIdentity)
+	return identity
 }
 
 func requestTenantScope(request *http.Request) string {

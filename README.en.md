@@ -16,9 +16,9 @@ Cline API reverse proxy · multi-account rotation · dual protocol · desktop ap
 
 ## Introduction
 
-Cline2API is a reverse proxy for the Cline API with multi-account rotation, dual protocol support (OpenAI + Anthropic Messages API), API key authentication, and a bilingual admin panel (English/Chinese, auto-detected from your browser language with a manual toggle in the sidebar). A single-file cross-platform desktop app (Windows / macOS / Linux) is included — just download and run.
+Cline2API is a reverse proxy for the Cline API with multi-account rotation, dual protocol support (OpenAI + Anthropic Messages API), API key authentication, and a bilingual admin panel (English/Chinese, auto-detected from your browser language with a manual toggle in the sidebar). Accounts, models, request logs, providers, settings, administrators, sessions, and API keys use PostgreSQL; Docker Compose starts it alongside the proxy.
 
-**Built with**: Go (backend + proxy + desktop shell), HTML/CSS/JS (embedded admin frontend).
+**Built with**: Go (backend + proxy + desktop shell), React 19 / TypeScript (embedded admin frontend).
 
 ## Features
 
@@ -28,18 +28,18 @@ Cline2API is a reverse proxy for the Cline API with multi-account rotation, dual
 - **Dynamic model sync**: fetches the official Cline recommended-models API on startup (free / cline-pass / recommended); a popup notifies you when the model list changes, and you can also click "Sync Models from Cline" in the panel anytime
 - **Custom provider management**: connect OpenAI Chat Completions or Anthropic Messages-compatible upstreams, sync/map their models, and load-balance channels that serve the same public model
 - **Custom models**: add/remove model IDs manually and pick a default model (falls back to the first free model automatically)
-- **API key auth**: protects proxy endpoints; generate/delete multiple API keys
+- **API key auth**: protects proxy endpoints with `sk-{uuid}` keys; name keys, set expiry, inspect last use, and revoke them. Plaintext is shown only once
 - **System Prompt override**: place an `override.md` next to the executable to replace the system prompt for all requests
 - **Account import/export**: OAuth login, manual tokens, batch file import, and cross-device export
 - **Automatic token renewal**: checks every minute and refreshes account tokens 5 minutes before expiry, with request-time and 401 retry fallbacks
 - **Request logs**: per-request token usage, latency, TPS, and more
-- **Desktop app**: single-file cross-platform app (Wails v2); closing the window stops the service
+- **Desktop app**: single-file cross-platform app (Wails v2); requires a PostgreSQL connection at runtime
 
 ## Quick Start
 
-### Option 1: Desktop app (recommended for sharing)
+### Option 1: Desktop app
 
-Download the executable for your platform from [Releases](https://github.com/luawei1/cline2api/releases) and double-click it.
+Download the executable for your platform from [Releases](https://github.com/luawei1/cline2api/releases). Configure `CLINE_DATABASE_URL`, `CLINE_ADMIN_EMAIL`, and `CLINE_ADMIN_PASSWORD` and provide PostgreSQL before running it. Docker Compose configures these services automatically.
 
 > On Windows, the SmartScreen "Windows protected your PC" warning is normal because no code-signing certificate is purchased. Click "More info → Run anyway".
 
@@ -53,22 +53,24 @@ Download the executable for your platform from [Releases](https://github.com/lua
 ### Option 2: Command line
 
 ```bash
+cd frontend && pnpm install --frozen-lockfile && pnpm build && cd ..
 go build -o cline-proxy .
 ./cline-proxy              # default port 3457
 ./cline-proxy -port 8080   # custom port
 ```
 
-Then open http://127.0.0.1:3457/admin/ for the admin panel.
+Set `CLINE_DATABASE_URL`, `CLINE_ADMIN_EMAIL`, and `CLINE_ADMIN_PASSWORD` for first-time setup before starting. Then open http://127.0.0.1:3457/admin/ for the admin panel.
 
 ### Option 3: Docker
 
 ```bash
+cp .env.example .env  # Set CLINE_DB_PASSWORD and CLINE_ADMIN_PASSWORD
 docker compose up -d      # build and start
 docker compose logs -f    # view logs
 docker compose down       # stop
 ```
 
-The container listens on `0.0.0.0:3457` (`-p 3457:3457` maps it externally). The admin panel has no auth by default — do **not** expose the port to the public internet.
+The container listens on `0.0.0.0:3457`, mapped to host port `4000` by Compose. The admin panel requires email and password login; configure HTTPS for public deployments.
 
 ## Usage Guide
 
@@ -84,7 +86,7 @@ In the admin panel, go to **Import**:
 
 ```
 Base URL: http://127.0.0.1:3457/v1
-API Key:  <key generated in the admin panel>
+API Key:  <sk-{uuid} generated in Settings → API Keys>
 Model:    <model from the synced list, e.g. stealth/ox-alpha>
 ```
 
@@ -121,7 +123,7 @@ Chat Completions exposes only standard OpenAI fields; upstream-only `reasoning_c
 
 You may also request the virtual `free` model. After a successful catalog sync, the proxy uses only free models that the upstream still advertises, prioritizing `z-ai/glm-5.3-flash`, `deepseek/deepseek-v4-flash`, and `cline-free/longcat-2.0`, then appending newly advertised free models in upstream order. Offline mode falls back to the three built-in models. Each model is limited to two non-cooling accounts, preventing unbounded retries during a free-pool outage. Request logs store the effective model.
 
-Multi-user isolation: every Cline upstream attempt gets an independent 128-bit cryptographically random session ID, used consistently for both `X-Task-ID` and body `session_id`; a 401 replay keeps the same ID, while a new attempt never reuses it. Zen compaction state, client cache keys, and user identifiers are namespaced by a non-reversible tenant digest of the downstream API key; cross-request shared state is disabled when no API key is configured. Audit logs contain only random request/task IDs and per-process-keyed HMAC-SHA256 values, never prompt or response text. Give each person/application a distinct API key. The account pool remains global to an instance, so sensitive multi-tenant deployments should also use separate instances/account pools.
+Multi-user isolation: every Cline upstream attempt gets an independent 128-bit cryptographically random session ID, used consistently for both `X-Task-ID` and body `session_id`; a 401 replay keeps the same ID, while a new attempt never reuses it. Zen compaction state, client cache keys, and user identifiers are namespaced by a non-reversible tenant digest of the downstream API key; proxy requests require a valid API key. Audit logs contain only random request/task IDs, masked key previews, and per-process-keyed HMAC-SHA256 values, never prompt or response text. Give each person/application a distinct API key. The account pool remains global to an instance, so sensitive multi-tenant deployments should also use separate instances/account pools.
 
 Current Codex custom providers use the Responses protocol. The included `codex-models.json` supplies 1M-context, reasoning, shell, and apply_patch metadata for DeepSeek and GLM, avoiding Codex's temporary unknown-model error. Example `~/.codex/config.toml`:
 
@@ -165,10 +167,10 @@ Create `override.md` next to the executable; its content replaces the system pro
 
 ### 5. Listen address & access settings (LAN / multi-NIC)
 
-By default the proxy listens on `127.0.0.1` (local only). The **Access Settings** section of the admin panel lets you:
+By default the proxy listens on `127.0.0.1` (local only). The Settings pages let you:
 
-- **Choose a listen address**: `127.0.0.1` (local) / `0.0.0.0` (all interfaces) / detected local IPs; saving restarts the listener immediately
-- **Admin password**: loopback access may be passwordless; non-loopback access requires a password (24h session cookie). Set the initial password with `CLINE_ADMIN_PASSWORD` for Docker/server deployments
+- **General**: choose a listen address (`127.0.0.1`, `0.0.0.0`, or a detected local IP); saving restarts the listener immediately
+- **Admins & Security**: manage email/password administrators and 24-hour database sessions; bootstrap with `CLINE_ADMIN_EMAIL` and `CLINE_ADMIN_PASSWORD`
 
 You can also set the listen address on the command line (priority: env var > panel setting > `127.0.0.1`):
 
@@ -183,7 +185,7 @@ You can also set the listen address on the command line (priority: env var > pan
 CLINE_PROXY_HOST=0.0.0.0 ./cline-proxy
 ```
 
-> ⚠️ **Security warning**: `/admin/` has no auth (unless you set a password). Listening on a non-loopback address (e.g. `0.0.0.0`) exposes it to your LAN. Only do this on a trusted network, or restrict port `3457` in your firewall.
+The admin and proxy endpoints always require credentials. Configure firewall rules and HTTPS for non-loopback deployments.
 
 ## Build
 
@@ -222,53 +224,52 @@ Browsers are less likely to block a zip than a bare exe:
 # Produces desktop/dist/ccline2api-windows-amd64.zip
 ```
 
-## Data Files
+## Legacy data migration
 
-Files are looked up in this order: executable directory → working directory → `~/.cline2api/`.
+On first connection to a new PostgreSQL database, the proxy imports the following legacy files once. It looks in the executable directory, then the working directory, then `~/.cline2api/`.
 
 | File | Purpose |
 |------|---------|
-| `.cline-accounts.json` | Account pool, API keys, custom models and default model |
+| `.cline-accounts.json` | Account pool, custom/default models, listen address, and legacy plaintext API keys |
 | `.cline-request-logs.json` | Request logs |
 | `.cline-zen.json` | OpenCode Zen, proxy, and compaction settings |
 | `.cline-providers.json` | Custom providers, API keys, and model mappings |
 | `.cline-config.json` | Proxy rotation strategy and upstream request headers |
 | `.cline-proxy.json` | Cline/WorkOS egress proxy pool and selection strategy |
-| `override.md` | System Prompt override (optional) |
+| `.cline-credentials.json` | OAuth credentials |
+| `override.md` | System Prompt override (optional; remains a file and is not imported) |
 
-> ⚠️ The account file contains refreshTokens and the custom-provider file contains API keys. Treat both as sensitive; never ship or commit them.
+PostgreSQL becomes the runtime source of truth after import. Each dataset is imported only if its database row is absent, so later restarts never overwrite it from a legacy file. Missing, empty, or JSON `null` files initialize defaults. Invalid legacy data prevents startup; fix the file and retry. Back up the legacy files before upgrading. They can remain as backups after import, but admin changes no longer write to them. You can still edit `override.md` directly.
 
-Docker Compose keeps the existing state files as bind mounts and stores custom-provider, general, and Cline egress-proxy configuration in automatically created `provider-data` and `config-data` named volumes. Before the first deployment, only the bind-mounted files need to exist:
+> ⚠️ Account, OAuth credential, and custom-provider files contain secrets. Never ship or commit them.
+
+Docker Compose mounts the legacy files for first import; ongoing data lives in the `auth-db` volume. Create missing bind-mounted files before deployment, without replacing existing files:
 
 ```bash
-touch .cline-accounts.json .cline-request-logs.json .cline-zen.json override.md
-chmod 600 .cline-accounts.json .cline-request-logs.json .cline-zen.json
+touch .cline-accounts.json .cline-request-logs.json .cline-zen.json .cline-credentials.json override.md
+chmod 600 .cline-accounts.json .cline-request-logs.json .cline-zen.json .cline-credentials.json
 ```
 
-Set the admin password in `.env` before startup; Docker Compose loads this file automatically. Without it, remote admin endpoints return `403` while public proxy endpoints remain available:
+Set the database password and initial admin password in `.env` before startup; Docker Compose loads this file automatically:
 
 ```bash
 cp .env.example .env
 chmod 600 .env
-# Edit .env and set CLINE_ADMIN_PASSWORD to a strong password-manager value.
+# Edit .env: set CLINE_DB_PASSWORD to a URL-safe random value and CLINE_ADMIN_PASSWORD to at least 12 characters.
 docker compose up -d --build
 ```
 
-`CLINE_ADMIN_PASSWORD` is used only to initialize an admin password when none has been saved. The initialized password is stored as an Argon2id hash; changing `.env` will not overwrite it, so use the admin panel for later password changes. Never commit `.env`.
+An existing admin password hash is migrated to the administrator named by `CLINE_ADMIN_EMAIL` (default `admin@local.test`). Existing plaintext API keys are imported as hashes; the legacy credentials are then removed from the account file. Changing `.env` after initialization does not reset a password; use the admin panel. Never commit `.env`. Non-Docker runs also require `CLINE_DATABASE_URL` and PostgreSQL. Set `CLINE_ADMIN_SECURE_COOKIE=true` behind an HTTPS reverse proxy.
 
-Use `CLINE_ALLOW_INSECURE_ADMIN=true` only as an explicit temporary override on an isolated trusted network.
-
-The application prefers atomic temp-file replacement. If Docker rejects `rename` over a file bind mount, it automatically falls back to a synced direct write so accounts, API keys, Zen settings, and request logs survive restarts.
-
-The admin panel can configure a separate Cline egress proxy pool. It applies only to `*.cline.bot` and `*.workos.com`, so custom-provider traffic is not accidentally routed through it, and proxy passwords are never returned to the browser. Docker stores this configuration in the `config-data` volume.
+The admin panel can configure a separate Cline egress proxy pool. It applies only to `*.cline.bot` and `*.workos.com`, so custom-provider traffic is not accidentally routed through it, and proxy passwords are never returned to the browser. After import, PostgreSQL stores this configuration.
 
 ## Available Models
 
-**Synced dynamically by default**: on startup the proxy fetches the official Cline recommended-models endpoint (free / cline-pass / recommended). When the list changes, the admin panel shows a popup; you can also hit "Sync Models from Cline" in Settings → Available Models at any time.
+**Synced dynamically by default**: on startup the proxy fetches the official Cline recommended-models endpoint (free / cline-pass / recommended). When the list changes, the admin panel shows a popup; you can also hit "Sync Models from Cline" in Settings → Models at any time.
 
 - After a successful sync, the panel lists the **remote models** (hardcoded built-ins remain only as an offline fallback)
-- Remote models are ready to use; you can add/remove **custom models** in the panel (items with an ✕ delete button are custom)
-- Set the default model in "Proxy Config → Default Model"; if unset, it falls back to the first free model
+- Remote models are ready to use; add/remove **custom models** in Settings → Models (items with an ✕ delete button are custom)
+- Set the default model in Settings → General; if unset, it falls back to the first free model
 
 > Built-in fallback models (used offline / when sync fails):
 > `z-ai/glm-5.3-flash`, `cline-free/longcat-2.0`, `cline-pass/glm-5.2`, `cline-pass/deepseek-v4-flash`, `cline-pass/qwen3.7-max`, `deepseek/deepseek-v4-flash`, `poolside/laguna-s-2.1:free`
@@ -280,7 +281,8 @@ The admin panel can configure a separate Cline egress proxy pool. It applies onl
 ├── desktop_main.go      Desktop entry (go build -tags desktop)
 ├── proxy.go             HTTP server, API routes, protocol conversion, SSE
 ├── admin.go             Admin REST API
-├── admin_html.go        Admin frontend (embedded)
+├── admin_frontend.go    Serves the embedded React build
+├── frontend/            React admin source and bundled dist/
 ├── models_sync.go       Cline model sync (startup + manual)
 ├── i18n.go              Bilingual (zh/en) messages for the admin API
 ├── auth.go              WorkOS OAuth + token refresh

@@ -1312,7 +1312,7 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 	isStream, _ := params["stream"].(bool)
 	log.Printf("  responses: model=%s stream=%v", model, isStream)
 
-	reqLog := newRequestLog("responses", model, isStream)
+	reqLog := newRequestLog("responses", model, isStream, r)
 
 	chat := responsesToChat(params)
 	attachRequestIsolation(chat, reqLog.ID, requestTenantScope(r))

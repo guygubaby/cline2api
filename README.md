@@ -16,9 +16,9 @@ Cline API 反向代理 · 多账号轮询 · 双协议兼容 · 桌面端
 
 ## 简介
 
-Cline2API 是 Cline API 的反向代理服务，支持多账号轮询、OpenAI 和 Anthropic Messages API 双协议、API Key 鉴权，内置中英文管理后台（自动跟随浏览器语言，可手动切换）。提供跨平台桌面端单文件应用（Windows / macOS / Linux），双击即用。
+Cline2API 是 Cline API 的反向代理服务，支持多账号轮询、OpenAI 和 Anthropic Messages API 双协议、API Key 鉴权，内置中英文管理后台（自动跟随浏览器语言，可手动切换）。账号、模型、请求日志、渠道、配置、管理员、会话与 API Key 均使用 PostgreSQL；Docker Compose 会一并启动数据库。
 
-**开发语言**：Go（后端 + 代理 + 桌面壳），HTML/CSS/JS（管理后台前端，内嵌于二进制）。
+**开发语言**：Go（后端 + 代理 + 桌面壳），React 19 / TypeScript（管理后台前端，构建后内嵌于二进制）。
 
 ## 功能
 
@@ -28,18 +28,18 @@ Cline2API 是 Cline API 的反向代理服务，支持多账号轮询、OpenAI �
 - **动态模型同步**：启动时自动拉取 Cline 官方推荐模型接口（免费/订阅模型），模型变化时弹窗提示，也可在后台手动「从 Cline 同步模型」
 - **第三方渠道管理**：接入 OpenAI Chat Completions 或 Anthropic Messages 兼容上游，同步/映射模型，并在支持同一公开模型的渠道间负载均衡
 - **自定义模型**：后台可手动添加/删除模型 ID，并自由选择默认模型（未设置时自动回退到第一个免费模型）
-- **API Key 鉴权**：保护代理端点，支持生成/删除多个 API Key
+- **API Key 鉴权**：保护代理端点，使用 `sk-{uuid}` 格式；支持命名、设置到期时间、查看最后使用时间和吊销，密钥只在创建时显示一次
 - **System Prompt 覆盖**：项目目录下放 `override.md` 则自动替换系统提示词
 - **账号导入/导出**：支持 OAuth 登录、手动 Token、批量文件导入，以及跨设备导出
 - **Token 自动续期**：每分钟巡检一次，并在账号 Token 即将过期前 5 分钟主动刷新；请求前与 401 响应时仍会兜底续期
 - **请求日志**：记录每次请求的 token 用量、耗时、TPS 等指标
-- **桌面端**：单文件跨平台桌面应用（Wails v2），关闭窗口即停止服务
+- **桌面端**：单文件跨平台桌面应用（Wails v2）；运行时需连接 PostgreSQL
 
 ## 快速开始
 
-### 方式一：桌面端（推荐，分享给他人）
+### 方式一：桌面端
 
-从 [Releases](https://github.com/luawei1/cline2api/releases) 下载对应平台的可执行文件，双击运行即可。
+从 [Releases](https://github.com/luawei1/cline2api/releases) 下载对应平台的可执行文件。运行前需设置 `CLINE_DATABASE_URL`、`CLINE_ADMIN_EMAIL` 和 `CLINE_ADMIN_PASSWORD` 并准备 PostgreSQL；Docker Compose 会自动配置这些服务。
 
 > Windows 提示 SmartScreen「已保护你的电脑」是**未购买代码签名证书的正常现象**，
 > 点击「更多信息 → 仍要运行」即可，不影响使用。
@@ -54,22 +54,24 @@ Cline2API 是 Cline API 的反向代理服务，支持多账号轮询、OpenAI �
 ### 方式二：命令行
 
 ```bash
+cd frontend && pnpm install --frozen-lockfile && pnpm build && cd ..
 go build -o cline-proxy .
 ./cline-proxy              # 默认端口 3457
 ./cline-proxy -port 8080   # 指定端口
 ```
 
-启动后访问 http://127.0.0.1:3457/admin/ 进入管理后台。
+启动前需设置 `CLINE_DATABASE_URL`、`CLINE_ADMIN_EMAIL` 和首次初始化用的 `CLINE_ADMIN_PASSWORD`。启动后访问 http://127.0.0.1:3457/admin/ 进入管理后台。
 
 ### 方式三：Docker
 
 ```bash
+cp .env.example .env  # 填写 CLINE_DB_PASSWORD 和 CLINE_ADMIN_PASSWORD
 docker compose up -d      # 构建并启动
 docker compose logs -f     # 查看日志
 docker compose down        # 停止
 ```
 
-容器内已配置监听 `0.0.0.0:3457`（`-p 3457:3457` 映射对外可达），管理后台同样无鉴权，请勿将端口暴露到公网。
+容器监听 `0.0.0.0:3457`，Compose 映射为主机端口 `4000`。管理后台需要邮箱和密码登录；对公网部署时请配置 HTTPS。
 
 ## 使用指南
 
@@ -85,7 +87,7 @@ docker compose down        # 停止
 
 ```
 Base URL: http://127.0.0.1:3457/v1
-API Key:  <在管理后台生成的 Key>
+API Key:  <设置 → API 密钥中生成的 sk-{uuid}>
 Model:    z-ai/glm-5.3-flash
 ```
 
@@ -122,7 +124,7 @@ Chat Completions 对外只返回 OpenAI 标准字段；上游专用的 `reasonin
 
 也可以请求虚拟模型 `free`：远程模型同步成功后，代理只使用上游当前仍在架的免费模型，并优先尝试 `z-ai/glm-5.3-flash`、`deepseek/deepseek-v4-flash`、`cline-free/longcat-2.0`；其余新免费模型按上游顺序补入。离线时回退到这三个内置模型。每个模型最多尝试 2 个未冷却账号，避免免费池故障时产生无界重试；请求日志记录最终实际模型。
 
-多用户隔离：每次发往 Cline 的上游尝试都生成独立的 128 位安全随机会话 ID，并同时用于 `X-Task-ID` 和 body `session_id`；401 原请求重放保持同一 ID，新的尝试绝不复用。Zen 压缩状态、客户端缓存键与 user 标识按下游 API Key 的不可逆租户摘要隔离；未配置 API Key 时禁用跨请求共享状态。审计日志只记录随机 request/task ID 和带进程随机密钥的 HMAC-SHA256，不记录提示词或响应正文。不同人员或应用必须使用不同 API Key；账号池仍由实例全局共享，敏感多租户场景还应使用独立实例/账号池。
+多用户隔离：每次发往 Cline 的上游尝试都生成独立的 128 位安全随机会话 ID，并同时用于 `X-Task-ID` 和 body `session_id`；401 原请求重放保持同一 ID，新的尝试绝不复用。Zen 压缩状态、客户端缓存键与 user 标识按下游 API Key 的不可逆租户摘要隔离；代理请求必须提供有效 API Key。审计日志只记录随机 request/task ID、遮罩后的 Key 标识和带进程随机密钥的 HMAC-SHA256，不记录提示词或响应正文。不同人员或应用必须使用不同 API Key；账号池仍由实例全局共享，敏感多租户场景还应使用独立实例/账号池。
 
 现代 Codex 自定义 Provider 使用 Responses 协议。仓库内的 `codex-models.json` 提供 DeepSeek 与 GLM 的 1M 上下文、reasoning、shell 和 apply_patch 元数据，可避免 Codex 的 unknown-model 临时错误。示例 `~/.codex/config.toml`：
 
@@ -169,7 +171,7 @@ Anthropic 流式转换会把 Cline/DeepSeek 的 `reasoning_content` 立即输出
 默认只监听 `127.0.0.1`（仅本机可访问）。管理后台 **访问设置** 区可：
 
 - **监听地址下拉选择**：`127.0.0.1`（仅本机）/ `0.0.0.0`（所有网卡）/ 本机检测到的 IP，保存后自动重启监听立即生效，选择会自动检测并展示本机 IP 列表
-- **管理后台密码**：回环访问默认可无密码；非回环访问必须设置密码（会话 Cookie，24h）。Docker/服务器部署请通过 `CLINE_ADMIN_PASSWORD` 设置初始密码
+- **管理员登录**：邮箱与密码登录，24 小时数据库会话；支持多个管理员、修改密码与退出。首次部署通过 `CLINE_ADMIN_EMAIL`、`CLINE_ADMIN_PASSWORD` 初始化
 
 命令行也可指定监听地址（优先级：环境变量 > 后台设置 > `127.0.0.1`）：
 
@@ -184,8 +186,7 @@ Anthropic 流式转换会把 Cline/DeepSeek 的 `reasoning_content` 立即输出
 CLINE_PROXY_HOST=0.0.0.0 ./cline-proxy
 ```
 
-> ⚠️ **安全警告**：管理后台 `/admin/` 无鉴权（除非设置了访问密码），监听非回环地址（如 `0.0.0.0`）会将其暴露给局域网。
-> 请确认网络环境可信，或配合防火墙仅放行需要的 IP 访问 `3457` 端口。
+管理后台与代理接口始终要求凭据。监听非回环地址时，请按部署网络设置防火墙及 HTTPS。
 
 ## 构建
 
@@ -224,9 +225,9 @@ git push origin v1.0.0
 # 产物：desktop/dist/ccline2api-windows-amd64.zip
 ```
 
-## 数据文件
+## 旧数据迁移
 
-程序按以下顺序查找数据文件（找到即使用）：
+首次连接新的 PostgreSQL 数据库时，程序会从以下旧文件一次性导入数据。查找顺序为：
 
 1. 可执行文件所在目录
 2. 当前工作目录
@@ -234,48 +235,47 @@ git push origin v1.0.0
 
 | 文件 | 说明 |
 |------|------|
-| `.cline-accounts.json` | 账号池、API Key、自定义模型与默认模型 |
+| `.cline-accounts.json` | 账号池、自定义模型、默认模型、监听地址及旧版明文 API Key |
 | `.cline-request-logs.json` | 请求日志 |
 | `.cline-zen.json` | OpenCode Zen 配置、代理与压缩设置 |
 | `.cline-providers.json` | 第三方渠道、API Key 与模型映射 |
 | `.cline-config.json` | 代理轮询策略与上游请求头 |
 | `.cline-proxy.json` | Cline/WorkOS 出口代理池与选择策略 |
-| `override.md` | System Prompt 覆盖（可选）|
+| `.cline-credentials.json` | OAuth 凭据 |
+| `override.md` | System Prompt 覆盖（可选，继续作为文件使用，不导入数据库）|
 
-> ⚠️ 账号文件含 refreshToken，第三方渠道文件含 API Key，均属于敏感凭据，不要放入发布包或提交到 Git。
+导入后 PostgreSQL 是上述 JSON 数据的运行时数据源。每项数据只导入一次；数据库已有对应记录时，不会再用旧文件覆盖。缺失、空文件或 JSON `null` 按默认值初始化；旧文件内容无效时启动会报错，修复文件后可重试。升级前请备份旧文件；导入后的文件可作为备份保留，但后续后台修改不会写回文件。`override.md` 仍可直接编辑。
 
-Docker Compose 对已有状态文件使用 bind mount，并用自动创建的 `provider-data`、`config-data` named volume 保存第三方渠道、通用配置和 Cline 出口代理配置。首次部署只需预先创建这些 bind mount 文件：
+> ⚠️ 账号、OAuth 凭据和第三方渠道文件包含密钥，不要放入发布包或提交到 Git。
+
+Docker Compose 将旧文件挂载供首次导入，持续运行的数据保存在 `auth-db` 数据卷。首次部署预先创建不存在的挂载文件；已有文件请保留原内容：
 
 ```bash
-touch .cline-accounts.json .cline-request-logs.json .cline-zen.json override.md
-chmod 600 .cline-accounts.json .cline-request-logs.json .cline-zen.json
+touch .cline-accounts.json .cline-request-logs.json .cline-zen.json .cline-credentials.json override.md
+chmod 600 .cline-accounts.json .cline-request-logs.json .cline-zen.json .cline-credentials.json
 ```
 
-启动前通过 `.env` 设置管理密码；Docker Compose 会自动读取该文件。未设置时远程管理接口会返回 `403`，公共代理接口不受影响：
+启动前通过 `.env` 设置数据库密码和初始管理员密码；Docker Compose 会自动读取该文件：
 
 ```bash
 cp .env.example .env
 chmod 600 .env
-# 编辑 .env，将 CLINE_ADMIN_PASSWORD 设置为密码管理器生成的强密码
+# 编辑 .env，填写 CLINE_DB_PASSWORD（URL 安全随机值）和 CLINE_ADMIN_PASSWORD（至少 12 位）
 docker compose up -d --build
 ```
 
-`CLINE_ADMIN_PASSWORD` 只在尚未保存管理密码时用于初始化。初始化后密码以 Argon2id 哈希保存；修改 `.env` 不会覆盖现有密码，后续请在管理后台修改。不要提交 `.env`。
+旧版管理密码哈希会迁移到 `CLINE_ADMIN_EMAIL` 指定的管理员（默认 `admin@local.test`）；已有明文 API Key 会以哈希形式导入数据库，旧凭据随后从账号文件移除。初始化后修改 `.env` 不会重置密码，请在后台修改。不要提交 `.env`。非 Docker 运行也需要设置 `CLINE_DATABASE_URL` 并连接 PostgreSQL；HTTPS 反向代理后将 `CLINE_ADMIN_SECURE_COOKIE=true`。
 
-只有受信任的隔离网络才可临时设置 `CLINE_ALLOW_INSECURE_ADMIN=true` 绕过远程密码要求。
-
-程序优先使用临时文件原子替换；若 Docker 单文件挂载拒绝 `rename`，会自动回退为同步写入挂载文件，确保账号、API Key、Zen 配置与请求日志重启后不会回退。
-
-管理后台可单独配置 Cline 出口代理池。它只作用于 `*.cline.bot` 与 `*.workos.com`，不会把第三方 Provider 流量误送到 Cline 代理；代理密码不会回显到浏览器。Docker 下配置保存于 `config-data` volume。
+管理后台可单独配置 Cline 出口代理池。它只作用于 `*.cline.bot` 与 `*.workos.com`，不会把第三方 Provider 流量误送到 Cline 代理；代理密码不会回显到浏览器。导入后配置保存在 PostgreSQL。
 
 ## 可用模型
 
 **默认动态同步**：程序启动时会自动从 Cline 官方推荐模型接口拉取最新模型（免费 / cline-pass / 推荐模型），
-模型列表变化时管理后台会弹窗提示，也可在「设置 → 可用模型」点击「从 Cline 同步模型」手动刷新。
+模型列表变化时管理后台会弹窗提示，也可在「设置 → 模型配置」点击「从 Cline 同步模型」手动刷新。
 
 - 同步成功后，后台模型列表以**远程模型**为主（内置硬编码模型仅作为离线 fallback）
-- 远程模型直接可用；后台「可用模型」区可添加/删除**自定义模型**（带 ✕ 删除按钮的是自定义项）
-- 默认模型可在「代理配置 → 默认模型」下拉中设置；未设置时自动回退到第一个免费模型
+- 远程模型直接可用；后台「设置 → 模型配置」可添加/删除**自定义模型**（带 ✕ 删除按钮的是自定义项）
+- 默认模型可在「设置 → 常规设置」下拉中设置；未设置时自动回退到第一个免费模型
 
 > 内置 fallback 模型（离线/同步失败时兜底）：
 > `z-ai/glm-5.3-flash`、`cline-free/longcat-2.0`、`cline-pass/glm-5.2`、`cline-pass/deepseek-v4-flash`、`cline-pass/qwen3.7-max`、`deepseek/deepseek-v4-flash`、`poolside/laguna-s-2.1:free`
@@ -287,7 +287,8 @@ docker compose up -d --build
 ├── desktop_main.go      桌面端入口（go build -tags desktop）
 ├── proxy.go             HTTP 服务、API 路由、协议转换、SSE
 ├── admin.go             管理后台 REST API
-├── admin_html.go        管理后台前端（内嵌）
+├── admin_frontend.go    内嵌 React 构建产物
+├── frontend/            React 管理后台源码与 dist 构建产物
 ├── auth.go              WorkOS OAuth + Token 刷新
 ├── pool.go              账号池管理、多位置数据查找
 ├── request_logs.go      请求日志

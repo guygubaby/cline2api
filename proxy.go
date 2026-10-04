@@ -264,7 +264,7 @@ func restartListener(host string, port int) error {
 		for _, ip := range detectLocalIPs() {
 			fmt.Printf("  http://%s:%d (LAN)\n", ip, port)
 		}
-		fmt.Println("  !!! 监听非本机地址，管理后台无鉴权，请确认网络环境安全")
+		fmt.Println("  !!! 监听非本机地址，请为管理后台配置 HTTPS 并确认网络环境安全")
 	}
 	fmt.Println(strings.Repeat("=", 58))
 	return server.ListenAndServe()
@@ -398,8 +398,13 @@ func chatStreamIncludesUsage(params map[string]any) bool {
 }
 
 func startProxy(host string, port int) error {
+	if err := initAuthStore(); err != nil {
+		return err
+	}
+	if host == "" {
+		host = configuredHost()
+	}
 	p := loadPool()
-	configureAdminPasswordFromEnvironment()
 	if validLoadBalancingStrategy(p.AccountStrategy) {
 		cfg := getProxyConfig()
 		cfg.Strategy = p.AccountStrategy
@@ -407,7 +412,6 @@ func startProxy(host string, port int) error {
 			log.Printf("proxy config save failed: %v", err)
 		}
 	}
-	loadRequestLogs()
 	activeCount := 0
 	for _, a := range p.Accounts {
 		if a.Status == "active" {
@@ -457,13 +461,6 @@ func startProxy(host string, port int) error {
 
 	apiKeyHandler := func(next http.HandlerFunc) http.HandlerFunc {
 		return corsHandler(func(w http.ResponseWriter, r *http.Request) {
-			// Allow requests without key if no keys configured
-			p := loadPool()
-			if len(p.Keys) == 0 {
-				next(w, requestWithTenantScope(r, ""))
-				return
-			}
-
 			key := r.Header.Get("x-api-key")
 			if key == "" {
 				if b := r.Header.Get("Authorization"); len(b) > 7 && b[:7] == "Bearer " {
@@ -471,15 +468,17 @@ func startProxy(host string, port int) error {
 				}
 			}
 
-			valid := false
-			for _, k := range p.Keys {
-				if k == key {
-					valid = true
-					break
+			identity, err := validAPIKey(r.Context(), key)
+			if err != nil {
+				if strings.Contains(r.URL.Path, "/messages") {
+					writeAnthropicError(w, http.StatusServiceUnavailable, "api_error", "API key validation unavailable")
+				} else {
+					writeOpenAIError(w, http.StatusServiceUnavailable, "server_error", "API key validation unavailable")
 				}
+				return
 			}
 
-			if !valid {
+			if identity.ID == "" {
 				message := "invalid API key. Generate one at /admin/ or set x-api-key header"
 				if strings.Contains(r.URL.Path, "/messages") {
 					writeAnthropicError(w, http.StatusUnauthorized, "authentication_error", message)
@@ -488,7 +487,7 @@ func startProxy(host string, port int) error {
 				}
 				return
 			}
-			next(w, requestWithTenantScope(r, key))
+			next(w, requestWithTenantScope(r, key, identity))
 		})
 	}
 
@@ -518,7 +517,7 @@ func startProxy(host string, port int) error {
 
 		isStream, _ := params["stream"].(bool)
 		model, _ := params["model"].(string)
-		reqLog := newRequestLog("openai", model, isStream)
+		reqLog := newRequestLog("openai", model, isStream, r)
 		if err := validateChatCompletionRequest(params); err != nil {
 			finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
 			writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
@@ -736,9 +735,9 @@ func startProxy(host string, port int) error {
 		for _, ip := range detectLocalIPs() {
 			fmt.Printf("  http://%s:%d (LAN)\n", ip, port)
 		}
-		fmt.Println("  !!! 监听非本机地址，管理后台无鉴权，请确认网络环境安全")
+		fmt.Println("  !!! 监听非本机地址，请为管理后台配置 HTTPS 并确认网络环境安全")
 	}
-	fmt.Println("  API Key: any value")
+	fmt.Println("  API Key: required (create one in /admin/)")
 	fmt.Printf("  Model:   %s\n", getDefaultModel())
 	fmt.Printf("  Accounts: %d total, %d active\n", len(loadPool().Accounts), activeCount)
 	if zc := getZenConfig(); zc.Enabled {
@@ -2582,7 +2581,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		req.MaxTokens = &maxTokens
 	}
 
-	reqLog := newRequestLog("anthropic", req.Model, req.Stream)
+	reqLog := newRequestLog("anthropic", req.Model, req.Stream, r)
 	openAIReq := anthropicToOpenAI(req)
 	attachRequestIsolation(openAIReq, reqLog.ID, requestTenantScope(r))
 	upstreamContext, cancelUpstream := context.WithCancel(r.Context())

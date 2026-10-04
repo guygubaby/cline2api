@@ -1,61 +1,41 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
-
-	"golang.org/x/net/html"
 )
 
-func htmlAttribute(node *html.Node, name string) string {
-	for _, attribute := range node.Attr {
-		if attribute.Key == name {
-			return attribute.Val
+func TestAdminFrontendAssets(t *testing.T) {
+	root := httptest.NewRecorder()
+	adminStaticHandler(root, httptest.NewRequest(http.MethodGet, "/admin/", nil))
+	if root.Code != http.StatusOK || !strings.Contains(root.Body.String(), `<div id="root"></div>`) {
+		t.Fatalf("admin index: status=%d body=%q", root.Code, root.Body.String())
+	}
+	if root.Header().Get("Cache-Control") != "no-store" {
+		t.Fatal("admin index must not be cached")
+	}
+	for _, route := range []string{"accounts", "import", "logs", "model-visibility", "providers", "settings", "settings/general", "settings/api-keys", "settings/security", "settings/models", "settings/upstreams", "settings/advanced", "about"} {
+		page := httptest.NewRecorder()
+		adminStaticHandler(page, httptest.NewRequest(http.MethodGet, "/admin/"+route, nil))
+		if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), `<div id="root"></div>`) {
+			t.Fatalf("admin route %s: status=%d", route, page.Code)
 		}
 	}
-	return ""
-}
-
-func TestAdminHTMLUsesSemanticNavigationAndLiveFeedback(t *testing.T) {
-	document, err := html.Parse(strings.NewReader(adminHTML))
-	if err != nil {
-		t.Fatalf("parse admin HTML: %v", err)
+	asset := regexp.MustCompile(`/admin/assets/[^" ]+\.js`).FindString(root.Body.String())
+	if asset == "" {
+		t.Fatal("admin script missing")
 	}
-	mainCount := 0
-	navigationButtons := 0
-	liveToast := false
-	var walk func(*html.Node)
-	walk = func(node *html.Node) {
-		if node.Type == html.ElementNode {
-			if node.Data == "main" && htmlAttribute(node, "id") == "mainContent" {
-				mainCount++
-			}
-			if node.Data == "button" && strings.Contains(" "+htmlAttribute(node, "class")+" ", " nav-item ") {
-				navigationButtons++
-			}
-			if htmlAttribute(node, "id") == "toast" && htmlAttribute(node, "aria-live") == "polite" {
-				liveToast = true
-			}
-		}
-		for child := node.FirstChild; child != nil; child = child.NextSibling {
-			walk(child)
-		}
+	response := httptest.NewRecorder()
+	adminStaticHandler(response, httptest.NewRequest(http.MethodGet, asset, nil))
+	if response.Code != http.StatusOK || response.Body.Len() == 0 || response.Header().Get("Cache-Control") == "" {
+		t.Fatalf("admin asset: status=%d bytes=%d", response.Code, response.Body.Len())
 	}
-	walk(document)
-	if mainCount != 1 || navigationButtons < 8 || !liveToast {
-		t.Fatalf("admin semantics: main=%d navigationButtons=%d liveToast=%v", mainCount, navigationButtons, liveToast)
-	}
-	if strings.Contains(adminHTML, "transition:all") {
-		t.Fatal("admin CSS still contains transition:all")
-	}
-	for _, unsafe := range []string{
-		`<div class="nav-item`,
-		`value="' + esc(`,
-		`title="' + esc(model.id)`,
-		`onclick="deleteModel(\'' + esc(`,
-	} {
-		if strings.Contains(adminHTML, unsafe) {
-			t.Fatalf("admin HTML contains context-unsafe dynamic markup %q", unsafe)
-		}
+	missing := httptest.NewRecorder()
+	adminStaticHandler(missing, httptest.NewRequest(http.MethodGet, "/admin/unknown", nil))
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("unknown admin path: %d", missing.Code)
 	}
 }

@@ -86,7 +86,7 @@ func loadPool() *AccountPool {
 		return pool
 	}
 
-	data, err := os.ReadFile(poolPath)
+	data, err := readStateFile(poolPath)
 	if err != nil {
 		pool = &AccountPool{Accounts: []*Account{}, Keys: []string{}, Models: []Model{}}
 		return pool

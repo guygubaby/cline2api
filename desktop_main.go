@@ -24,7 +24,7 @@ func main() {
 	defer flushRuntimeState()
 	selfCheck := flag.Bool("selfcheck", false, "Start embedded proxy, wait for /health, and exit")
 	port := flag.Int("port", configuredDesktopPort(), "Proxy server port")
-	host := flag.String("host", configuredDesktopHost(), "Proxy server listen host (0.0.0.0 = all interfaces)")
+	host := flag.String("host", "", "Proxy server listen host (0.0.0.0 = all interfaces)")
 	flag.Parse()
 
 	proxyErr := make(chan error, 1)
@@ -41,8 +41,12 @@ func main() {
 		return
 	}
 
-	if !isLoopbackHost(*host) {
-		log.Printf("警告: 监听 %s 非本机回环地址，桌面窗口可能无法自动连接，建议使用 127.0.0.1 或 0.0.0.0", *host)
+	actualHost := *host
+	if actualHost == "" {
+		actualHost = configuredHost()
+	}
+	if !isLoopbackHost(actualHost) {
+		log.Printf("警告: 监听 %s 非本机回环地址，桌面窗口可能无法自动连接，建议使用 127.0.0.1 或 0.0.0.0", actualHost)
 	}
 
 	if err := runDesktopWindow(*port); err != nil {
@@ -55,16 +59,6 @@ func configuredDesktopPort() int {
 		return value
 	}
 	return defaultDesktopPort
-}
-
-func configuredDesktopHost() string {
-	if value := os.Getenv("CLINE_PROXY_HOST"); value != "" {
-		return value
-	}
-	if value := loadPool().ListenHost; value != "" {
-		return value
-	}
-	return "127.0.0.1"
 }
 
 func waitForEmbeddedProxy(port int, timeout time.Duration, proxyErr <-chan error) error {

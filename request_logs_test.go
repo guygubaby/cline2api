@@ -2,17 +2,40 @@ package main
 
 import (
 	"encoding/json"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestRequestLogRecordsMaskedClientAPIKey(t *testing.T) {
+	key := "cline_test_secret_1234"
+	request := requestWithTenantScope(httptest.NewRequest("POST", "/v1/messages", nil), key, apiKeyIdentity{ID: "key-123", Name: "client A"})
+	entry := newRequestLog("anthropic", "test-model", false, request)
+	if entry.APIKeyPreview != "••••1234" || entry.APIKeyID != "key-123" || entry.APIKeyName != "client A" {
+		t.Fatalf("API key identity = %+v", entry)
+	}
+	encoded, err := json.Marshal(entry)
+	if err != nil || strings.Contains(string(encoded), key) || !strings.Contains(string(encoded), `"apiKeyPreview":"••••1234"`) {
+		t.Fatalf("unsafe request log JSON: %s, err=%v", encoded, err)
+	}
+	request = requestWithTenantScope(httptest.NewRequest("POST", "/v1/responses", nil), "", apiKeyIdentity{})
+	if got := newRequestLog("responses", "test-model", false, request).APIKeyPreview; got != "anonymous" {
+		t.Fatalf("anonymous API key preview = %q", got)
+	}
+	request = requestWithTenantScope(httptest.NewRequest("POST", "/v1/chat/completions", nil), "短密钥", apiKeyIdentity{})
+	if got := newRequestLog("openai", "test-model", false, request).APIKeyPreview; got != "••••" {
+		t.Fatalf("short API key preview = %q", got)
+	}
+}
 
 func TestSummarizeRequestUsageByViewerDate(t *testing.T) {
 	now := time.Date(2026, 9, 24, 1, 0, 0, 0, time.UTC) // 09:00 in UTC+8
 	requestLogsMu.Lock()
 	previous := requestLogs
 	requestLogs = []RequestLog{
-		{StartedAt: now.Add(-30 * time.Minute), InputTokens: 10, OutputTokens: 5, CachedTokens: 2, TotalTokens: 15},
-		{StartedAt: now.Add(-10 * time.Hour), InputTokens: 20, OutputTokens: 7, TotalTokens: 27},
+		{StartedAt: now.Add(-30 * time.Minute), Model: "model-a", Upstream: "cline", Completed: true, OutputTPS: 50, TTFTMs: 200, InputTokens: 10, OutputTokens: 5, CachedTokens: 2, TotalTokens: 15},
+		{StartedAt: now.Add(-10 * time.Hour), Model: "model-b", Upstream: "opencode", OutputTPS: 100, TTFTMs: 300, InputTokens: 20, OutputTokens: 7, TotalTokens: 27},
 		{StartedAt: now.Add(-25 * time.Hour), InputTokens: 30, TotalTokens: 30},
 		{StartedAt: now.Add(-8 * 24 * time.Hour), InputTokens: 40, TotalTokens: 40},
 		{StartedAt: now.Add(-31 * 24 * time.Hour), InputTokens: 50, TotalTokens: 50},
@@ -28,9 +51,15 @@ func TestSummarizeRequestUsageByViewerDate(t *testing.T) {
 	if today.Summary.Requests != 1 || today.Summary.TotalTokens != 15 || len(today.Days) != 1 || today.Days[0].Date != "2026-09-24" {
 		t.Fatalf("today usage = %+v", today)
 	}
+	if len(today.Models) != 1 || today.Models[0].Name != "model-a" || today.Models[0].AvgOutputTPS != 50 || today.Performance.AvgTTFTMs != 200 || today.Performance.Completed != 1 {
+		t.Fatalf("today model/performance = %+v", today)
+	}
 	lastDay := summarizeRequestUsage(now, "1d", -480)
 	if lastDay.Summary.Requests != 2 || lastDay.Summary.TotalTokens != 42 || len(lastDay.Days) != 2 || lastDay.Days[1].Date != "2026-09-23" {
 		t.Fatalf("last 24 hours usage = %+v", lastDay)
+	}
+	if len(lastDay.Upstreams) != 2 || lastDay.Performance.Failed != 1 || lastDay.Performance.AvgOutputTPS != 50 || lastDay.Performance.AvgTTFTMs != 250 {
+		t.Fatalf("last day breakdown/performance = %+v", lastDay)
 	}
 	week := summarizeRequestUsage(now, "7d", -480)
 	if week.Summary.Requests != 3 || len(week.Days) != 7 || week.Days[6].Date != "2026-09-18" {

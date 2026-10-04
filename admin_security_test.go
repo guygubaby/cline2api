@@ -3,7 +3,6 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"testing"
 )
 
@@ -44,41 +43,38 @@ func TestAdminOriginGuardAllowsSameOriginRequests(t *testing.T) {
 	}
 }
 
-func TestRemoteAdminRequiresPasswordByDefault(t *testing.T) {
-	withTestPool(t, &AccountPool{})
-	t.Setenv(allowInsecureAdminEnv, "")
+func TestAdminNeverBypassesSessionWithoutDatabase(t *testing.T) {
+	previousDB := authDB
+	authDB = nil
+	t.Cleanup(func() { authDB = previousDB })
 	called := false
 	handler := requireAdminAuth(func(w http.ResponseWriter, r *http.Request) {
 		called = true
 		w.WriteHeader(http.StatusNoContent)
 	})
-	request := httptest.NewRequest(http.MethodGet, "http://example.test/admin/api/stats", nil)
-	request.RemoteAddr = "192.0.2.10:54321"
-	response := httptest.NewRecorder()
-
-	handler(response, request)
-
-	if response.Code != http.StatusForbidden || called {
-		t.Fatalf("remote passwordless admin: status=%d called=%v", response.Code, called)
+	for _, remoteAddr := range []string{"127.0.0.1:54321", "192.0.2.10:54321"} {
+		request := httptest.NewRequest(http.MethodGet, "http://example.test/admin/api/stats", nil)
+		request.RemoteAddr = remoteAddr
+		response := httptest.NewRecorder()
+		handler(response, request)
+		if response.Code != http.StatusServiceUnavailable || called {
+			t.Fatalf("admin without auth database from %s: status=%d called=%v", remoteAddr, response.Code, called)
+		}
 	}
 }
 
 func TestAdminPasswordUsesArgon2AndLegacyHashesStillVerify(t *testing.T) {
-	testPool := &AccountPool{}
-	withTestPool(t, testPool)
-	oldPoolPath := poolPath
-	poolPath = filepath.Join(t.TempDir(), "accounts.json")
-	t.Cleanup(func() { poolPath = oldPoolPath })
-	setAdminPassword("correct horse battery staple")
-	if len(testPool.AdminPasswordHash) <= len(adminPasswordHashPrefix) || testPool.AdminPasswordHash[:len(adminPasswordHashPrefix)] != adminPasswordHashPrefix {
-		t.Fatalf("admin hash is not Argon2id: %q", testPool.AdminPasswordHash)
+	salt := randomHex(16)
+	hash := hashAdminPassword(salt, "correct horse battery staple")
+	if len(hash) <= len(adminPasswordHashPrefix) || hash[:len(adminPasswordHashPrefix)] != adminPasswordHashPrefix {
+		t.Fatalf("admin hash is not Argon2id: %q", hash)
 	}
-	if !verifyAdminPassword("correct horse battery staple") || verifyAdminPassword("wrong") {
+	if !verifyStoredPassword(hash, salt, "correct horse battery staple") || verifyStoredPassword(hash, salt, "wrong") {
 		t.Fatal("Argon2id password verification failed")
 	}
 
-	testPool.AdminPasswordHash = legacyAdminPasswordHash(testPool.AdminPasswordSalt, "legacy-password")
-	if !verifyAdminPassword("legacy-password") {
+	legacy := legacyAdminPasswordHash(salt, "legacy-password")
+	if !verifyStoredPassword(legacy, salt, "legacy-password") {
 		t.Fatal("legacy password hash compatibility failed")
 	}
 }

@@ -33,3 +33,4 @@ build/bin/
 
 # wails frontend scaffolding leftovers
 frontend/wailsjs/
+frontend/node_modules/

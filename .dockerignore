@@ -1,0 +1,11 @@
+.git
+frontend/node_modules
+frontend/.vite
+frontend/src
+frontend/index.html
+frontend/tsconfig.json
+frontend/vite.config.ts
+frontend/pnpm-lock.yaml
+.env
+.cline-*.json
+override.md

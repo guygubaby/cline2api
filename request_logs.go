@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"os"
+	"net/http"
 	"sort"
 	"sync"
 	"time"
@@ -19,12 +19,15 @@ const (
 )
 
 type RequestLog struct {
-	ID           string    `json:"id"`
-	StartedAt    time.Time `json:"startedAt"`
-	FinishedAt   time.Time `json:"finishedAt"`
-	AccountID    string    `json:"accountId"`
-	AccountEmail string    `json:"accountEmail"`
-	Protocol     string    `json:"protocol"`
+	ID            string    `json:"id"`
+	StartedAt     time.Time `json:"startedAt"`
+	FinishedAt    time.Time `json:"finishedAt"`
+	AccountID     string    `json:"accountId"`
+	AccountEmail  string    `json:"accountEmail"`
+	APIKeyPreview string    `json:"apiKeyPreview,omitempty"`
+	APIKeyID      string    `json:"apiKeyId,omitempty"`
+	APIKeyName    string    `json:"apiKeyName,omitempty"`
+	Protocol      string    `json:"protocol"`
 	// Upstream 标记上游来源：cline、opencode 或 custom:<渠道名>
 	Upstream             string  `json:"upstream,omitempty"`
 	Model                string  `json:"model"`
@@ -67,13 +70,17 @@ var (
 	requestLogsSaveWake = make(chan string, 1)
 )
 
-func newRequestLog(protocol, model string, stream bool) RequestLog {
+func newRequestLog(protocol, model string, stream bool, request *http.Request) RequestLog {
+	identity := requestAPIKeyIdentity(request)
 	return RequestLog{
-		ID:        newProxyRequestID(),
-		StartedAt: time.Now(),
-		Protocol:  protocol,
-		Model:     model,
-		Stream:    stream,
+		ID:            newProxyRequestID(),
+		StartedAt:     time.Now(),
+		Protocol:      protocol,
+		Model:         model,
+		Stream:        stream,
+		APIKeyPreview: requestAPIKeyPreview(request),
+		APIKeyID:      identity.ID,
+		APIKeyName:    identity.Name,
 	}
 }
 
@@ -82,7 +89,7 @@ func init() {
 }
 
 func loadRequestLogs() {
-	data, err := os.ReadFile(requestLogsPath)
+	data, err := readStateFile(requestLogsPath)
 	if err != nil {
 		return
 	}
@@ -248,8 +255,31 @@ type requestUsageDay struct {
 }
 
 type requestUsagePeriod struct {
-	Summary requestUsageSummary `json:"summary"`
-	Days    []requestUsageDay   `json:"days"`
+	Summary     requestUsageSummary     `json:"summary"`
+	Days        []requestUsageDay       `json:"days"`
+	Models      []requestUsageBreakdown `json:"models"`
+	Upstreams   []requestUsageBreakdown `json:"upstreams"`
+	Performance requestPerformance      `json:"performance"`
+}
+
+type requestUsageBreakdown struct {
+	Name string `json:"name"`
+	requestUsageSummary
+	Completed    int64   `json:"completed"`
+	AvgOutputTPS float64 `json:"avgOutputTps"`
+	speedTotal   float64
+	speedSamples int64
+}
+
+type requestPerformance struct {
+	Completed    int64   `json:"completed"`
+	Failed       int64   `json:"failed"`
+	AvgOutputTPS float64 `json:"avgOutputTps"`
+	SpeedSamples int64   `json:"speedSamples"`
+	AvgTTFTMs    float64 `json:"avgTtftMs"`
+	TTFTSamples  int64   `json:"ttftSamples"`
+	speedTotal   float64
+	ttftTotal    int64
 }
 
 func (s *requestUsageSummary) add(entry RequestLog) {
@@ -289,8 +319,10 @@ func summarizeRequestUsage(now time.Time, period string, timezoneOffsetMinutes i
 	localStart := start.In(location)
 	firstDay := time.Date(localStart.Year(), localStart.Month(), localStart.Day(), 0, 0, 0, 0, location)
 
-	result := requestUsagePeriod{Days: make([]requestUsageDay, 0, 30)}
+	result := requestUsagePeriod{Days: make([]requestUsageDay, 0, 30), Models: []requestUsageBreakdown{}, Upstreams: []requestUsageBreakdown{}}
 	dayIndexes := make(map[string]int)
+	models := make(map[string]*requestUsageBreakdown)
+	upstreams := make(map[string]*requestUsageBreakdown)
 	for day := today; !day.Before(firstDay); day = day.AddDate(0, 0, -1) {
 		date := day.Format("2006-01-02")
 		dayIndexes[date] = len(result.Days)
@@ -307,6 +339,69 @@ func summarizeRequestUsage(now time.Time, period string, timezoneOffsetMinutes i
 		}
 		result.Summary.add(entry)
 		result.Days[index].requestUsageSummary.add(entry)
+		model := entry.Model
+		if model == "" {
+			model = "unknown"
+		}
+		upstream := entry.Upstream
+		if upstream == "" {
+			upstream = "unknown"
+		}
+		for _, group := range []struct {
+			name string
+			set  map[string]*requestUsageBreakdown
+		}{{model, models}, {upstream, upstreams}} {
+			item := group.set[group.name]
+			if item == nil {
+				item = &requestUsageBreakdown{Name: group.name}
+				group.set[group.name] = item
+			}
+			item.requestUsageSummary.add(entry)
+			if entry.Completed {
+				item.Completed++
+			}
+			if entry.Completed && entry.OutputTPS > 0 {
+				item.speedTotal += entry.OutputTPS
+				item.speedSamples++
+			}
+		}
+		if entry.Completed {
+			result.Performance.Completed++
+		} else {
+			result.Performance.Failed++
+		}
+		if entry.Completed && entry.OutputTPS > 0 {
+			result.Performance.speedTotal += entry.OutputTPS
+			result.Performance.SpeedSamples++
+		}
+		if entry.TTFTMs > 0 {
+			result.Performance.ttftTotal += entry.TTFTMs
+			result.Performance.TTFTSamples++
+		}
+	}
+	for _, group := range []struct {
+		set map[string]*requestUsageBreakdown
+		out *[]requestUsageBreakdown
+	}{{models, &result.Models}, {upstreams, &result.Upstreams}} {
+		for _, item := range group.set {
+			if item.speedSamples > 0 {
+				item.AvgOutputTPS = item.speedTotal / float64(item.speedSamples)
+			}
+			*group.out = append(*group.out, *item)
+		}
+		sort.Slice(*group.out, func(i, j int) bool {
+			left, right := (*group.out)[i], (*group.out)[j]
+			if left.Requests != right.Requests {
+				return left.Requests > right.Requests
+			}
+			return left.Name < right.Name
+		})
+	}
+	if result.Performance.SpeedSamples > 0 {
+		result.Performance.AvgOutputTPS = result.Performance.speedTotal / float64(result.Performance.SpeedSamples)
+	}
+	if result.Performance.TTFTSamples > 0 {
+		result.Performance.AvgTTFTMs = float64(result.Performance.ttftTotal) / float64(result.Performance.TTFTSamples)
 	}
 	return result
 }

@@ -1,0 +1,1 @@
+import{i as e}from"./Settings-DfnehW3o.js";var t=e;export{t as component};
