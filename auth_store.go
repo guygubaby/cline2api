@@ -95,6 +95,14 @@ func initAuthStore() error {
 			preview text NOT NULL, created_by text REFERENCES admin_users(id) ON DELETE SET NULL,
 			created_at timestamptz NOT NULL DEFAULT now(), expires_at timestamptz,
 			last_used_at timestamptz, revoked_at timestamptz)`,
+		`ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS quota_tokens bigint`,
+		`ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS used_tokens bigint NOT NULL DEFAULT 0`,
+		`ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS request_count bigint NOT NULL DEFAULT 0`,
+		`ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS model_rules jsonb`,
+		`CREATE TABLE IF NOT EXISTS api_key_usage (
+			request_id text PRIMARY KEY, key_id text NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE,
+			tokens bigint NOT NULL, completed boolean NOT NULL, created_at timestamptz NOT NULL DEFAULT now())`,
+		`CREATE INDEX IF NOT EXISTS api_key_usage_key_idx ON api_key_usage(key_id, created_at DESC)`,
 		`CREATE TABLE IF NOT EXISTS app_state (
 			name text PRIMARY KEY, data jsonb NOT NULL, updated_at timestamptz NOT NULL DEFAULT now())`,
 	} {
@@ -112,6 +120,10 @@ func initAuthStore() error {
 		return fmt.Errorf("migrate legacy state: %w", err)
 	}
 	if err := activateStateStore(db); err != nil {
+		db.Close()
+		return err
+	}
+	if err := backfillAPIKeyUsage(ctx, db); err != nil {
 		db.Close()
 		return err
 	}
@@ -214,9 +226,12 @@ func lookupAdminSession(r *http.Request) (adminUser, error) {
 }
 
 type apiKeyIdentity struct {
-	ID      string
-	Name    string
-	Preview string
+	ID          string
+	Name        string
+	Preview     string
+	QuotaTokens *int64
+	UsedTokens  int64
+	ModelRules  []apiKeyModelRule
 }
 
 func validAPIKey(ctx context.Context, key string) (apiKeyIdentity, error) {
@@ -227,12 +242,25 @@ func validAPIKey(ctx context.Context, key string) (apiKeyIdentity, error) {
 		return apiKeyIdentity{}, nil
 	}
 	var identity apiKeyIdentity
-	err := authDB.QueryRowContext(ctx, `SELECT id,name,preview FROM api_keys WHERE token_hash=$1 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>now())`, tokenHash(key)).Scan(&identity.ID, &identity.Name, &identity.Preview)
+	var quota sql.NullInt64
+	var modelRules []byte
+	err := authDB.QueryRowContext(ctx, `SELECT id,name,preview,quota_tokens,used_tokens,model_rules FROM api_keys WHERE token_hash=$1 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>now())`, tokenHash(key)).Scan(&identity.ID, &identity.Name, &identity.Preview, &quota, &identity.UsedTokens, &modelRules)
 	if errors.Is(err, sql.ErrNoRows) {
 		return apiKeyIdentity{}, nil
 	}
 	if err != nil {
 		return apiKeyIdentity{}, err
+	}
+	if quota.Valid {
+		identity.QuotaTokens = &quota.Int64
+	}
+	if modelRules != nil {
+		if err := json.Unmarshal(modelRules, &identity.ModelRules); err != nil {
+			return apiKeyIdentity{}, fmt.Errorf("decode API key model rules: %w", err)
+		}
+		if identity.ModelRules == nil {
+			identity.ModelRules = []apiKeyModelRule{}
+		}
 	}
 	// Updating at most once per minute keeps last-used useful without a write on every call.
 	_, _ = authDB.ExecContext(ctx, `UPDATE api_keys SET last_used_at=now() WHERE id=$1 AND (last_used_at IS NULL OR last_used_at<now()-interval '1 minute')`, identity.ID)
@@ -362,13 +390,88 @@ func sessionCookieValue(r *http.Request) string {
 }
 
 type apiKeyRecord struct {
-	ID         string     `json:"id"`
-	Name       string     `json:"name"`
-	Preview    string     `json:"preview"`
-	CreatedAt  time.Time  `json:"createdAt"`
-	ExpiresAt  *time.Time `json:"expiresAt,omitempty"`
-	LastUsedAt *time.Time `json:"lastUsedAt,omitempty"`
-	RevokedAt  *time.Time `json:"revokedAt,omitempty"`
+	ID           string            `json:"id"`
+	Name         string            `json:"name"`
+	Preview      string            `json:"preview"`
+	CreatedAt    time.Time         `json:"createdAt"`
+	ExpiresAt    *time.Time        `json:"expiresAt,omitempty"`
+	LastUsedAt   *time.Time        `json:"lastUsedAt,omitempty"`
+	RevokedAt    *time.Time        `json:"revokedAt,omitempty"`
+	QuotaTokens  *int64            `json:"quotaTokens"`
+	UsedTokens   int64             `json:"usedTokens"`
+	RequestCount int64             `json:"requestCount"`
+	ModelRules   []apiKeyModelRule `json:"modelRules"`
+}
+
+const apiKeyRecordColumns = `id,name,preview,created_at,expires_at,last_used_at,revoked_at,quota_tokens,used_tokens,request_count,model_rules`
+
+func scanAPIKeyRecord(scanner interface{ Scan(...any) error }) (apiKeyRecord, error) {
+	var key apiKeyRecord
+	var expires, lastUsed, revoked sql.NullTime
+	var quota sql.NullInt64
+	var modelRules []byte
+	err := scanner.Scan(&key.ID, &key.Name, &key.Preview, &key.CreatedAt, &expires, &lastUsed, &revoked, &quota, &key.UsedTokens, &key.RequestCount, &modelRules)
+	if err != nil {
+		return key, err
+	}
+	if expires.Valid {
+		key.ExpiresAt = &expires.Time
+	}
+	if lastUsed.Valid {
+		key.LastUsedAt = &lastUsed.Time
+	}
+	if revoked.Valid {
+		key.RevokedAt = &revoked.Time
+	}
+	if quota.Valid {
+		key.QuotaTokens = &quota.Int64
+	}
+	if modelRules != nil {
+		if err := json.Unmarshal(modelRules, &key.ModelRules); err != nil {
+			return key, err
+		}
+	}
+	return key, nil
+}
+
+func parseAPIKeyExpiresAt(value string, futureOnly bool) (*time.Time, error) {
+	if value == "" {
+		return nil, nil
+	}
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil || futureOnly && !parsed.After(time.Now()) {
+		return nil, errors.New("expiresAt must be a valid future ISO timestamp")
+	}
+	return &parsed, nil
+}
+
+type apiKeyInput struct {
+	ID         string            `json:"id"`
+	Name       string            `json:"name"`
+	ExpiresAt  string            `json:"expiresAt"`
+	QuotaM     *float64          `json:"quotaM"`
+	ModelRules []apiKeyModelRule `json:"modelRules"`
+}
+
+func validateAPIKeyInput(input apiKeyInput, futureOnly bool) (string, *time.Time, *int64, []byte, error) {
+	name := strings.TrimSpace(input.Name)
+	if name == "" || len(name) > 80 {
+		return "", nil, nil, nil, errors.New("key name must be 1-80 characters")
+	}
+	expires, err := parseAPIKeyExpiresAt(input.ExpiresAt, futureOnly)
+	if err != nil {
+		return "", nil, nil, nil, err
+	}
+	quota, err := apiKeyQuotaTokens(input.QuotaM)
+	if err != nil {
+		return "", nil, nil, nil, err
+	}
+	rules, err := normalizeAPIKeyModelRules(input.ModelRules, getListedModels())
+	if err != nil {
+		return "", nil, nil, nil, err
+	}
+	encoded, err := encodeAPIKeyModelRules(rules)
+	return name, expires, quota, encoded, err
 }
 
 func handleManagedKeysList(w http.ResponseWriter, r *http.Request) {
@@ -376,7 +479,7 @@ func handleManagedKeysList(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
 		return
 	}
-	rows, err := authDB.QueryContext(r.Context(), `SELECT id,name,preview,created_at,expires_at,last_used_at,revoked_at FROM api_keys ORDER BY created_at DESC`)
+	rows, err := authDB.QueryContext(r.Context(), `SELECT `+apiKeyRecordColumns+` FROM api_keys ORDER BY created_at DESC`)
 	if err != nil {
 		writeAPI(w, http.StatusServiceUnavailable, apiResponse{Error: "auth database unavailable"})
 		return
@@ -384,20 +487,10 @@ func handleManagedKeysList(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	keys := []apiKeyRecord{}
 	for rows.Next() {
-		var key apiKeyRecord
-		var expires, lastUsed, revoked sql.NullTime
-		if err := rows.Scan(&key.ID, &key.Name, &key.Preview, &key.CreatedAt, &expires, &lastUsed, &revoked); err != nil {
+		key, err := scanAPIKeyRecord(rows)
+		if err != nil {
 			writeAPI(w, http.StatusServiceUnavailable, apiResponse{Error: "auth database unavailable"})
 			return
-		}
-		if expires.Valid {
-			key.ExpiresAt = &expires.Time
-		}
-		if lastUsed.Valid {
-			key.LastUsedAt = &lastUsed.Time
-		}
-		if revoked.Valid {
-			key.RevokedAt = &revoked.Time
 		}
 		keys = append(keys, key)
 	}
@@ -408,42 +501,97 @@ func handleManagedKeysList(w http.ResponseWriter, r *http.Request) {
 	writeAPI(w, http.StatusOK, apiResponse{Success: true, Data: map[string]any{"keys": keys}})
 }
 
+func handleManagedKeyDetail(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
+		return
+	}
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "id is required"})
+		return
+	}
+	record, err := scanAPIKeyRecord(authDB.QueryRowContext(r.Context(), `SELECT `+apiKeyRecordColumns+` FROM api_keys WHERE id=$1`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		writeAPI(w, http.StatusNotFound, apiResponse{Error: "API key not found"})
+		return
+	}
+	if err != nil {
+		writeAPI(w, http.StatusServiceUnavailable, apiResponse{Error: "auth database unavailable"})
+		return
+	}
+	writeAPI(w, http.StatusOK, apiResponse{Success: true, Data: record})
+}
+
+func handleManagedKeyModels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
+		return
+	}
+	writeAPI(w, http.StatusOK, apiResponse{Success: true, Data: map[string]any{"models": getListedModels()}})
+}
+
 func handleManagedKeyCreate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
 		return
 	}
-	var input struct{ Name, ExpiresAt string }
+	var input apiKeyInput
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_json")})
 		return
 	}
-	name := strings.TrimSpace(input.Name)
-	if name == "" || len(name) > 80 {
-		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "key name must be 1-80 characters"})
+	name, expires, quota, modelRules, err := validateAPIKeyInput(input, true)
+	if err != nil {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
 		return
-	}
-	var expires *time.Time
-	if input.ExpiresAt != "" {
-		parsed, err := time.Parse(time.RFC3339, input.ExpiresAt)
-		if err != nil || !parsed.After(time.Now()) {
-			writeAPI(w, http.StatusBadRequest, apiResponse{Error: "expiresAt must be a future ISO timestamp"})
-			return
-		}
-		expires = &parsed
 	}
 	key, err := newAPIKey()
 	if err != nil {
 		writeAPI(w, http.StatusInternalServerError, apiResponse{Error: "key generation failed"})
 		return
 	}
-	record := apiKeyRecord{ID: randomHex(16), Name: name, Preview: maskedAPIKeyPreview(key), CreatedAt: time.Now().UTC(), ExpiresAt: expires}
-	_, err = authDB.ExecContext(r.Context(), `INSERT INTO api_keys(id,name,token_hash,preview,created_by,created_at,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7)`, record.ID, record.Name, tokenHash(key), record.Preview, currentAdmin(r).ID, record.CreatedAt, record.ExpiresAt)
+	record := apiKeyRecord{ID: randomHex(16), Name: name, Preview: maskedAPIKeyPreview(key), CreatedAt: time.Now().UTC(), ExpiresAt: expires, QuotaTokens: quota}
+	_ = json.Unmarshal(modelRules, &record.ModelRules)
+	_, err = authDB.ExecContext(r.Context(), `INSERT INTO api_keys(id,name,token_hash,preview,created_by,created_at,expires_at,quota_tokens,model_rules) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)`, record.ID, record.Name, tokenHash(key), record.Preview, currentAdmin(r).ID, record.CreatedAt, record.ExpiresAt, record.QuotaTokens, string(modelRules))
 	if err != nil {
 		writeAPI(w, http.StatusServiceUnavailable, apiResponse{Error: "key creation failed"})
 		return
 	}
 	writeAPI(w, http.StatusCreated, apiResponse{Success: true, Data: map[string]any{"key": key, "record": record}})
+}
+
+func handleManagedKeyUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
+		return
+	}
+	var input apiKeyInput
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil || input.ID == "" {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_json")})
+		return
+	}
+	name, expires, quota, modelRules, err := validateAPIKeyInput(input, false)
+	if err != nil {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
+		return
+	}
+	result, err := authDB.ExecContext(r.Context(), `UPDATE api_keys SET name=$2,expires_at=$3,quota_tokens=$4,model_rules=$5::jsonb WHERE id=$1 AND revoked_at IS NULL`, input.ID, name, expires, quota, string(modelRules))
+	if err != nil {
+		writeAPI(w, http.StatusServiceUnavailable, apiResponse{Error: "auth database unavailable"})
+		return
+	}
+	changed, _ := result.RowsAffected()
+	if changed == 0 {
+		writeAPI(w, http.StatusNotFound, apiResponse{Error: "API key not found or already revoked"})
+		return
+	}
+	record, err := scanAPIKeyRecord(authDB.QueryRowContext(r.Context(), `SELECT `+apiKeyRecordColumns+` FROM api_keys WHERE id=$1`, input.ID))
+	if err != nil {
+		writeAPI(w, http.StatusServiceUnavailable, apiResponse{Error: "auth database unavailable"})
+		return
+	}
+	writeAPI(w, http.StatusOK, apiResponse{Success: true, Data: record})
 }
 
 func handleManagedKeyRevoke(w http.ResponseWriter, r *http.Request) {

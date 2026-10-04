@@ -1310,9 +1310,17 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 	model, _ := params["model"].(string)
 	isStream, _ := params["stream"].(bool)
-	log.Printf("  responses: model=%s stream=%v", model, isStream)
-
 	reqLog := newRequestLog("responses", model, isStream, r)
+	reqLog.EstimatedInputTokens = estimateRawRequestTokens(body)
+	canonical, allowed := authorizeAPIKeyRequest(w, r, model, false, false)
+	if !allowed {
+		finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, "API key model or quota restriction")
+		return
+	}
+	model = canonical
+	params["model"] = canonical
+	reqLog.Model = canonical
+	log.Printf("  responses: model=%s stream=%v", model, isStream)
 
 	chat := responsesToChat(params)
 	attachRequestIsolation(chat, reqLog.ID, requestTenantScope(r))

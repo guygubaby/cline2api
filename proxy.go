@@ -492,7 +492,7 @@ func startProxy(host string, port int) error {
 	}
 
 	modelsHandler := apiKeyHandler(func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, buildModelsResponse(getListedModels(), isAnthropicModelsRequest(r)))
+		writeJSON(w, http.StatusOK, buildModelsResponse(apiKeyListedModels(requestAPIKeyIdentity(r), getListedModels()), isAnthropicModelsRequest(r)))
 	})
 	mux.HandleFunc("/v1/models", modelsHandler)
 	mux.HandleFunc("/models", modelsHandler)
@@ -518,11 +518,20 @@ func startProxy(host string, port int) error {
 		isStream, _ := params["stream"].(bool)
 		model, _ := params["model"].(string)
 		reqLog := newRequestLog("openai", model, isStream, r)
+		reqLog.EstimatedInputTokens = estimateRawRequestTokens(body)
 		if err := validateChatCompletionRequest(params); err != nil {
 			finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
 			writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 			return
 		}
+		canonical, allowed := authorizeAPIKeyRequest(w, r, model, false, false)
+		if !allowed {
+			finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, "API key model or quota restriction")
+			return
+		}
+		model = canonical
+		params["model"] = canonical
+		reqLog.Model = canonical
 		includeUsage := chatStreamIncludesUsage(params)
 		toolCount := 0
 		if tools, ok := params["tools"]; ok {
@@ -2575,13 +2584,21 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "messages is required")
 		return
 	}
+	reqLog := newRequestLog("anthropic", req.Model, req.Stream, r)
+	reqLog.EstimatedInputTokens = estimateRawRequestTokens(body)
+	canonical, allowed := authorizeAPIKeyRequest(w, r, req.Model, true, false)
+	if !allowed {
+		finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, "API key model or quota restriction")
+		return
+	}
+	req.Model = canonical
+	reqLog.Model = canonical
 
 	if req.MaxTokens == nil {
 		maxTokens := defaultMaxTokens
 		req.MaxTokens = &maxTokens
 	}
 
-	reqLog := newRequestLog("anthropic", req.Model, req.Stream, r)
 	openAIReq := anthropicToOpenAI(req)
 	attachRequestIsolation(openAIReq, reqLog.ID, requestTenantScope(r))
 	upstreamContext, cancelUpstream := context.WithCancel(r.Context())
@@ -2856,6 +2873,9 @@ func handleAnthropicCountTokens(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(req.Messages) == 0 {
 		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "messages is required")
+		return
+	}
+	if _, allowed := authorizeAPIKeyRequest(w, r, req.Model, true, true); !allowed {
 		return
 	}
 	inputTokens := estimateRawRequestTokens(body)

@@ -28,7 +28,7 @@ Cline2API is a reverse proxy for the Cline API with multi-account rotation, dual
 - **Dynamic model sync**: fetches the official Cline recommended-models API on startup (free / cline-pass / recommended); a popup notifies you when the model list changes, and you can also click "Sync Models from Cline" in the panel anytime
 - **Custom provider management**: connect OpenAI Chat Completions or Anthropic Messages-compatible upstreams, sync/map their models, and load-balance channels that serve the same public model
 - **Custom models**: add/remove model IDs manually and pick a default model (falls back to the first free model automatically)
-- **API key auth**: protects proxy endpoints with `sk-{uuid}` keys; name keys, set expiry, inspect last use, and revoke them. Plaintext is shown only once
+- **API key auth**: protects proxy endpoints with `sk-{uuid}` keys; set expiry, lifetime token quotas in millions, allowed models, and per-key model aliases. Inspect details, edit, or revoke each key. Plaintext is shown only once
 - **System Prompt override**: place an `override.md` next to the executable to replace the system prompt for all requests
 - **Account import/export**: OAuth login, manual tokens, batch file import, and cross-device export
 - **Automatic token renewal**: checks every minute and refreshes account tokens 5 minutes before expiry, with request-time and 401 retry fallbacks
@@ -114,6 +114,8 @@ If a Responses upstream requires `stream: true`, enable "Force streaming for Res
 | Anthropic Token Count | `POST /v1/messages/count_tokens` | Standard `{ "input_tokens": number }` shape using a local approximation |
 
 Authentication accepts both OpenAI's `Authorization: Bearer <key>` and Anthropic's `x-api-key: <key>`. Anthropic SDKs may send the usual `anthropic-version` and `anthropic-beta` headers.
+
+Per-key model choices come from the current public `/v1/models` list. When an alias is set, that key's model list shows the alias; both the alias and original model ID route to the original model. Quotas count lifetime total tokens (1M = 1,000,000 tokens), using upstream usage when available and estimated input for completed requests without usage. The metered-request count includes only calls with actual or estimated usage. New generation requests are rejected once the quota is reached; concurrent requests already in flight may take the final total slightly over the limit. Legacy keys remain unrestricted until edited.
 
 > The upstream is a Chat Completions service, so features requiring vendor-side state or hosted execution cannot be faithfully emulated. OpenAI `background`, `previous_response_id`, `conversation`, and hosted tools, plus Anthropic server tools, containers, and Skills, return a standard error instead of being silently dropped. For stateless multi-turn Responses calls, send previous output items back in the next `input`.
 

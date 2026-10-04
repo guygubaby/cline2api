@@ -1,24 +1,23 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import dayjs from 'dayjs'
 import { Link } from '@tanstack/react-router'
 import { ArrowUpRight } from 'lucide-react'
 import { Button, Field, PageTitle, Section, useAdmin } from '../App'
 import { get, post } from '../api'
 import { SelectField } from '../components/app-select'
 import type { AdminConfig, Model } from '../types'
+export { ApiKeysSettingsPage } from './ApiKeys'
 
 type ModelsData = { models: Model[]; lastSync?: { syncedAt?: string; changed?: boolean; added?: string[]; removed?: string[] } }
 type OcConfig = { enabled: boolean; key: string; baseURL: string; maxConcurrency: number; retries: number; failover: boolean; failoverCount: number; failoverMinutes: number; proxyStrategy: string; proxies: string[]; proxyCooldowns?: Record<string, string>; syncedModels?: number; runtime?: { failoverActive?: boolean }; compaction?: { auto: boolean; buffer: number; keepTokens: number; maxSummary: number } }
 type ClineProxy = { proxyStrategy: string; configuredProxies: string[] }
-type KeyRecord = { id: string; name: string; preview: string; createdAt: string; expiresAt?: string; lastUsedAt?: string; revokedAt?: string }
 type UserRecord = { id: string; email: string; createdAt: string; disabledAt?: string }
 const splitLines = (value: string) => value.split('\n').map(s => s.trim()).filter(Boolean)
 const strategyOptions = [{ value: 'round_robin', label: 'Round Robin' }, { value: 'random', label: 'Random' }, { value: 'fill', label: 'Fill' }]
 
 const modules = [
   { to: '/settings/general', title: '常规设置', description: '负载均衡、默认模型与监听地址' },
-  { to: '/settings/api-keys', title: 'API 密钥', description: '创建、查看使用情况和吊销密钥' },
+  { to: '/settings/api-keys', title: 'API 密钥', description: '创建、编辑与吊销，限制额度和模型' },
   { to: '/settings/security', title: '管理员与安全', description: '管理员账号与登录密码' },
   { to: '/settings/models', title: '模型配置', description: '模型同步、添加与上下文' },
   { to: '/settings/upstreams', title: '上游配置', description: 'OpenCode 和 Cline 出口代理' },
@@ -34,11 +33,6 @@ export function GeneralSettingsPage() {
   const config = useQuery({ queryKey: ['config'], queryFn: async () => (await get<AdminConfig>('config')).data })
   const models = useQuery({ queryKey: ['models'], queryFn: async () => (await get<ModelsData>('models')).data })
   return <><PageTitle title={t('常规设置')} subtitle={t('负载均衡、模型默认值与监听地址')}/>{config.data && <General initial={config.data} models={models.data?.models || []}/>}</>
-}
-export function ApiKeysSettingsPage() {
-  const { t } = useAdmin()
-  const keys = useQuery({ queryKey: ['keys'], queryFn: async () => (await get<{ keys: KeyRecord[] }>('keys')).data.keys || [] })
-  return <><PageTitle title={t('API 密钥')} subtitle={t('为每个客户端创建独立密钥')}/><Keys keys={keys.data || []}/></>
 }
 export function SecuritySettingsPage() {
   const { t } = useAdmin()
@@ -77,18 +71,6 @@ function PasswordSettings() {
   const [currentPassword, setCurrentPassword] = useState('')
   const [newPassword, setNewPassword] = useState('')
   return <Section title={t('修改登录密码')}><form className="flex flex-wrap items-end gap-3" onSubmit={async event => { event.preventDefault(); if (await run(() => post('password', { currentPassword, newPassword }), '密码已更新')) { setCurrentPassword(''); setNewPassword('') } }}><Field label={t('当前密码')}><input type="password" autoComplete="current-password" required value={currentPassword} onChange={event => setCurrentPassword(event.target.value)}/></Field><Field label={t('新密码')}><input type="password" autoComplete="new-password" minLength={12} required value={newPassword} onChange={event => setNewPassword(event.target.value)}/></Field><Button type="submit">{t('更新密码')}</Button></form></Section>
-}
-function Keys({ keys }: { keys: KeyRecord[] }) {
-  const { t, run, notify } = useAdmin()
-  const [generated, setGenerated] = useState('')
-  const [name, setName] = useState('')
-  const [expires, setExpires] = useState('')
-  const copy = async (value: string) => { try { await navigator.clipboard.writeText(value); notify(t('已复制到剪贴板')) } catch (error) { notify((error as Error).message, true) } }
-  return <Section title={t('API 密钥')}>
-    <form className="mb-4 flex flex-wrap items-end gap-3" onSubmit={async event => { event.preventDefault(); const body = { name, ...(expires ? { expiresAt: new Date(`${expires}T23:59:59`).toISOString() } : {}) }; if (await run(async () => { const response = await post<{ key: string }>('keys/generate', body); setGenerated(response.data.key) }, '密钥已生成')) { setName(''); setExpires('') } }}><Field label={t('用途名称')}><input required maxLength={80} value={name} onChange={event => setName(event.target.value)} placeholder={t('例如：生产环境客户端')}/></Field><Field label={t('到期日期（可选）')}><input type="date" min={dayjs().format('YYYY-MM-DD')} value={expires} onChange={event => setExpires(event.target.value)}/></Field><Button type="submit">{t('创建 API 密钥')}</Button></form>
-    {generated && <div className="mb-4 rounded-lg border border-emerald-200 bg-emerald-50 p-4"><p className="text-sm font-semibold text-emerald-800">{t('密钥只显示这一次，请立即复制保存')}</p><div className="mt-2 flex min-w-0 flex-wrap items-center gap-2"><code className="min-w-0 flex-1 break-all text-sm">{generated}</code><Button onClick={() => copy(generated)}>{t('复制密钥')}</Button><button type="button" className="text-sm text-emerald-800 underline" onClick={() => setGenerated('')}>{t('完成')}</button></div></div>}
-    <div className="overflow-x-auto"><table className="w-full min-w-[760px]"><thead><tr>{['名称', '密钥预览', '创建时间', '最后使用', '到期时间', '状态', '操作'].map(label => <th key={label}>{t(label)}</th>)}</tr></thead><tbody>{keys.map(key => <tr key={key.id}><td>{key.name}</td><td className="font-mono">{key.preview}</td><td>{dayjs(key.createdAt).format('YYYY-MM-DD HH:mm')}</td><td>{key.lastUsedAt ? dayjs(key.lastUsedAt).format('YYYY-MM-DD HH:mm') : '-'}</td><td>{key.expiresAt ? dayjs(key.expiresAt).format('YYYY-MM-DD') : t('永不过期')}</td><td>{key.revokedAt ? t('已吊销') : key.expiresAt && dayjs(key.expiresAt).isBefore(dayjs()) ? t('已过期') : t('有效')}</td><td>{!key.revokedAt && <button type="button" className="text-sm text-destructive hover:underline" onClick={() => confirm(`${t('确定吊销此密钥？')} ${key.name}`) && run(() => post('keys/delete', { id: key.id }), '密钥已吊销')}>{t('吊销')}</button>}</td></tr>)}</tbody></table>{!keys.length && <p className="py-8 text-center text-sm text-muted-foreground">{t('暂无 API 密钥')}</p>}</div>
-  </Section>
 }
 function Users({ users }: { users: UserRecord[] }) {
   const { t, run, user } = useAdmin()

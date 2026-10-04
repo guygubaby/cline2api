@@ -495,5 +495,6 @@ func finalizeRequestLog(entry *RequestLog, usage tokenUsage, firstOutputAt time.
 	}
 
 	entry.promptEchoGuard = nil
+	chargeAPIKeyUsage(*entry)
 	appendRequestLog(*entry)
 }

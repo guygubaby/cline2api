@@ -28,7 +28,7 @@ Cline2API 是 Cline API 的反向代理服务，支持多账号轮询、OpenAI �
 - **动态模型同步**：启动时自动拉取 Cline 官方推荐模型接口（免费/订阅模型），模型变化时弹窗提示，也可在后台手动「从 Cline 同步模型」
 - **第三方渠道管理**：接入 OpenAI Chat Completions 或 Anthropic Messages 兼容上游，同步/映射模型，并在支持同一公开模型的渠道间负载均衡
 - **自定义模型**：后台可手动添加/删除模型 ID，并自由选择默认模型（未设置时自动回退到第一个免费模型）
-- **API Key 鉴权**：保护代理端点，使用 `sk-{uuid}` 格式；支持命名、设置到期时间、查看最后使用时间和吊销，密钥只在创建时显示一次
+- **API Key 鉴权**：保护代理端点，使用 `sk-{uuid}` 格式；每根密钥可设置到期时间、按百万 Token 计的累计额度、可调用模型及模型别名，也可查看详情、编辑和吊销。密钥只在创建时显示一次
 - **System Prompt 覆盖**：项目目录下放 `override.md` 则自动替换系统提示词
 - **账号导入/导出**：支持 OAuth 登录、手动 Token、批量文件导入，以及跨设备导出
 - **Token 自动续期**：每分钟巡检一次，并在账号 Token 即将过期前 5 分钟主动刷新；请求前与 401 响应时仍会兜底续期
@@ -115,6 +115,8 @@ Model:    z-ai/glm-5.3-flash
 | Anthropic Token Count | `POST /v1/messages/count_tokens` | 返回标准 `{ "input_tokens": number }` 结构（本地近似估算） |
 
 鉴权同时接受 OpenAI 的 `Authorization: Bearer <key>` 和 Anthropic 的 `x-api-key: <key>`；Anthropic SDK 可照常发送 `anthropic-version`、`anthropic-beta` 请求头。
+
+API Key 的模型候选来自当前 `/v1/models` 对外可见列表。设置别名后，该密钥的模型列表展示别名；客户端用别名或原模型 ID 调用时都会路由到原模型。额度按累计总 Token 计算（1M = 1,000,000 Token）；优先使用上游返回的 usage，缺少 usage 的已完成请求按输入量估算。详情中的计量请求仅统计有实际或估算用量的调用。额度到达后拒绝新的生成请求，已经开始的并发请求可能使最终用量略超额度。旧版密钥保留原有不限模型、不限额度行为，编辑后可设置限制。
 
 > 上游实际是 Chat Completions，因此无法可靠模拟需要厂商服务端状态或托管执行环境的功能。OpenAI 的 `background`、`previous_response_id`、`conversation`、托管工具，以及 Anthropic 的服务端工具、容器/Skill 等请求会返回标准错误，不会静默丢弃。Responses 可通过在下一次 `input` 中回传之前的 output items 实现无状态多轮调用。
 
