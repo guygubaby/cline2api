@@ -1,0 +1,1 @@
+import{n as e}from"./Core-H4NKK3BW.js";var t=e;export{t as component};

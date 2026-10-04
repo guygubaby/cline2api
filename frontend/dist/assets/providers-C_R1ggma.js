@@ -1,0 +1,1 @@
+import{t as e}from"./Providers-gmnss-Rq.js";var t=e;export{t as component};

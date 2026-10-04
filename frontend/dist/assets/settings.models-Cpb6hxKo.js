@@ -1,0 +1,1 @@
+import{a as e}from"./Settings-C0-mbarr.js";var t=e;export{t as component};

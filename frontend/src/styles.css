@@ -153,15 +153,13 @@ th{color:var(--text2);font-weight:600;font-size:11px;text-transform:uppercase;le
 tbody tr:last-child td{border-bottom:none}
 tbody tr{transition:background 0.15s var(--ease)}
 tbody tr:hover{background:var(--surface2)}
-.account-table{min-width:1160px}
-.account-table>thead>tr>th:first-child,.account-table>tbody>.account-summary-row>td:first-child{width:42px;text-align:center}
-.account-table>thead>tr>th:nth-child(2),.account-table>tbody>.account-summary-row>td:nth-child(2){width:48px;text-align:right;color:var(--text3)}
-.account-table>thead>tr>th:nth-child(3),.account-table>tbody>.account-summary-row>td:nth-child(3){width:16%}
-.account-table>thead>tr>th:nth-child(4),.account-table>tbody>.account-summary-row>td:nth-child(4){width:8%}
-.account-table>thead>tr>th:nth-child(5),.account-table>tbody>.account-summary-row>td:nth-child(5){width:5%}
-.account-table>thead>tr>th:nth-child(6),.account-table>tbody>.account-summary-row>td:nth-child(6),.account-table>thead>tr>th:nth-child(7),.account-table>tbody>.account-summary-row>td:nth-child(7),.account-table>thead>tr>th:nth-child(8),.account-table>tbody>.account-summary-row>td:nth-child(8),.account-table>thead>tr>th:nth-child(9),.account-table>tbody>.account-summary-row>td:nth-child(9){width:7%;text-align:right;font-variant-numeric:tabular-nums}
-.account-table>thead>tr>th:nth-child(10),.account-table>tbody>.account-summary-row>td:nth-child(10),.account-table>thead>tr>th:nth-child(11),.account-table>tbody>.account-summary-row>td:nth-child(11){width:11%;white-space:nowrap;color:var(--text2)}
-.account-table>thead>tr>th:last-child,.account-table>tbody>.account-summary-row>td:last-child{width:156px;min-width:156px;text-align:right;white-space:nowrap}
+.account-table{min-width:1540px;table-layout:auto}
+.account-table>thead>tr>th:first-child,.account-table>tbody>.account-summary-row>td:first-child{width:48px;min-width:48px;text-align:center}
+.account-table>thead>tr>th:nth-child(2),.account-table>tbody>.account-summary-row>td:nth-child(2){min-width:250px;overflow-wrap:anywhere}
+.account-table>thead>tr>th:nth-child(3),.account-table>tbody>.account-summary-row>td:nth-child(3){min-width:190px}
+.account-table>thead>tr>th:nth-child(n+4):nth-child(-n+8),.account-table>tbody>.account-summary-row>td:nth-child(n+4):nth-child(-n+8){min-width:96px;text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.account-table>thead>tr>th:nth-child(9),.account-table>tbody>.account-summary-row>td:nth-child(9){min-width:185px;white-space:nowrap}
+.account-table>thead>tr>th:last-child,.account-table>tbody>.account-summary-row>td:last-child{min-width:280px;text-align:right;white-space:nowrap}
 .account-select{width:16px;height:16px;accent-color:var(--accent);cursor:pointer}
 .account-pager{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 16px;border-top:1px solid var(--border2);color:var(--text2);font-size:12px}
 .account-actions{display:flex;align-items:center;justify-content:flex-end;gap:4px}
@@ -186,15 +184,14 @@ tbody tr:hover{background:var(--surface2)}
 .account-email{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);font-weight:500}
 .account-cards{display:none}
 .log-cards{display:none}
-.log-table{min-width:1300px}
-.log-table th:first-child,.log-table td:first-child{width:12%;white-space:nowrap;color:var(--text2)}
-.log-table th:nth-child(2),.log-table td:nth-child(2){width:11%}
-.log-table th:nth-child(3),.log-table td:nth-child(3){width:9%}
-.log-table th:nth-child(4),.log-table td:nth-child(4){width:6%}
-.log-table th:nth-child(5),.log-table td:nth-child(5){width:14%}
-.log-table th:nth-child(6),.log-table td:nth-child(6),.log-table th:nth-child(7),.log-table td:nth-child(7),.log-table th:nth-child(8),.log-table td:nth-child(8),.log-table th:nth-child(9),.log-table td:nth-child(9){width:5%;text-align:right;font-variant-numeric:tabular-nums}
-.log-table th:nth-child(10),.log-table td:nth-child(10),.log-table th:nth-child(11),.log-table td:nth-child(11),.log-table th:nth-child(12),.log-table td:nth-child(12){width:7%;text-align:right;font-variant-numeric:tabular-nums}
-.log-table th:last-child,.log-table td:last-child{width:7%;text-align:right;white-space:nowrap}
+.log-table{min-width:1730px;table-layout:auto}
+.log-table th:first-child,.log-table td:first-child{min-width:185px;white-space:nowrap;color:var(--text2)}
+.log-table th:nth-child(2),.log-table td:nth-child(2){min-width:230px;overflow-wrap:anywhere}
+.log-table th:nth-child(3),.log-table td:nth-child(3){min-width:155px;overflow-wrap:anywhere}
+.log-table th:nth-child(4),.log-table td:nth-child(4){min-width:100px}
+.log-table th:nth-child(5),.log-table td:nth-child(5){min-width:240px;max-width:280px;overflow-wrap:anywhere}
+.log-table th:nth-child(n+6):nth-child(-n+12),.log-table td:nth-child(n+6):nth-child(-n+12){min-width:95px;text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.log-table th:last-child,.log-table td:last-child{min-width:100px;text-align:right;white-space:nowrap}
 .log-status{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:12px;font-size:11px;font-weight:600}
 .latency-phases{display:grid;gap:2px;min-width:92px;text-align:left;font-size:10px;line-height:1.25;color:var(--text2);font-variant-numeric:tabular-nums}
 .latency-phases strong{color:var(--text);font-weight:600}
@@ -371,14 +368,11 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
 	  .main{padding:30px 32px 56px}
 	  .cards{grid-template-columns:repeat(2,minmax(0,1fr))}
 	  .cards.tokens{grid-template-columns:repeat(3,minmax(0,1fr))}
-	  .account-table>thead>tr>th:nth-child(9),.account-table>tbody>.account-summary-row>td:nth-child(9){display:none}
 	}
 	@media (max-width:760px){
-	  .log-table{display:none}
 	  .log-cards{display:grid;gap:10px;padding:12px}
 	}
 	@media (max-width:760px){
-	  .account-table{display:none}
 	  .account-cards{display:grid;gap:10px;padding:12px}
 	  .account-card{border:1px solid var(--border2);border-radius:12px;padding:14px;background:var(--surface2)}
 	  .account-card-header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}
