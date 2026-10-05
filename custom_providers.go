@@ -273,7 +273,7 @@ func cloneCustomProvider(provider CustomProvider) CustomProvider {
 	for key, value := range provider.Headers {
 		clone.Headers[key] = value
 	}
-	clone.Models = append([]CustomProviderModel(nil), provider.Models...)
+	clone.Models = append([]CustomProviderModel{}, provider.Models...)
 	return clone
 }
 

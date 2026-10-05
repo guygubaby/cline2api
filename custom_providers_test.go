@@ -230,6 +230,31 @@ func TestCustomProviderCatalogAggregatesChannelsAndMasksKeys(t *testing.T) {
 	}
 }
 
+func TestCustomProviderAdminDataUsesEmptyModelArray(t *testing.T) {
+	isolateCustomProviderState(t)
+	if _, err := upsertCustomProvider(CustomProvider{
+		Name: "without-models", Protocol: customProviderProtocolOpenAI,
+		BaseURL: "https://example.com/v1", APIKey: "test-key", Enabled: true,
+	}); err != nil {
+		t.Fatalf("save provider: %v", err)
+	}
+	encoded, err := json.Marshal(customProviderAdminData())
+	if err != nil {
+		t.Fatalf("encode admin data: %v", err)
+	}
+	var data struct {
+		Providers []struct {
+			Models json.RawMessage `json:"models"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(encoded, &data); err != nil {
+		t.Fatalf("decode admin data: %v", err)
+	}
+	if len(data.Providers) != 1 || string(data.Providers[0].Models) != "[]" {
+		t.Fatalf("empty provider models must be [], got %s", encoded)
+	}
+}
+
 func TestLeastLatencyProviderExploresUnknownThenUsesFastest(t *testing.T) {
 	isolateCustomProviderState(t)
 	slow := addTestCustomProvider(t, CustomProvider{
