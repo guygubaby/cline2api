@@ -266,6 +266,13 @@ chmod 600 .env
 docker compose up -d --build
 ```
 
+Docker 构建默认优先使用阿里云 Go 模块镜像，失败后切换七牛 `goproxy.cn`，并输出具体下载 URL。`GOPROXY` 使用 `|` 分隔，使超时或 HTTP 错误也能触发备用镜像；保留 Go 模块校验。需要切换为其他镜像时，可覆盖构建参数：
+
+```bash
+docker compose --progress=plain build --build-arg GOPROXY='https://mirrors.tencent.com/go/|https://goproxy.cn' cline-proxy
+docker compose up -d
+```
+
 旧版管理密码哈希会迁移到 `CLINE_ADMIN_EMAIL` 指定的管理员（默认 `admin@local.test`）；已有明文 API Key 会以哈希形式导入数据库，旧凭据随后从账号文件移除。初始化后修改 `.env` 不会重置密码，请在后台修改。不要提交 `.env`。非 Docker 运行也需要设置 `CLINE_DATABASE_URL` 并连接 PostgreSQL；HTTPS 反向代理后将 `CLINE_ADMIN_SECURE_COOKIE=true`。
 
 管理后台可单独配置 Cline 出口代理池。它只作用于 `*.cline.bot` 与 `*.workos.com`，不会把第三方 Provider 流量误送到 Cline 代理；代理密码不会回显到浏览器。导入后配置保存在 PostgreSQL。

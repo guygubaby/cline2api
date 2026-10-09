@@ -261,6 +261,13 @@ chmod 600 .env
 docker compose up -d --build
 ```
 
+Docker builds use the Aliyun Go module mirror first, then `goproxy.cn`, and log download URLs. The `|` separator enables fallback on timeouts and HTTP errors while retaining module checksum verification. Override the build argument to use another mirror:
+
+```bash
+docker compose --progress=plain build --build-arg GOPROXY='https://mirrors.tencent.com/go/|https://goproxy.cn' cline-proxy
+docker compose up -d
+```
+
 An existing admin password hash is migrated to the administrator named by `CLINE_ADMIN_EMAIL` (default `admin@local.test`). Existing plaintext API keys are imported as hashes; the legacy credentials are then removed from the account file. Changing `.env` after initialization does not reset a password; use the admin panel. Never commit `.env`. Non-Docker runs also require `CLINE_DATABASE_URL` and PostgreSQL. Set `CLINE_ADMIN_SECURE_COOKIE=true` behind an HTTPS reverse proxy.
 
 The admin panel can configure a separate Cline egress proxy pool. It applies only to `*.cline.bot` and `*.workos.com`, so custom-provider traffic is not accidentally routed through it, and proxy passwords are never returned to the browser. After import, PostgreSQL stores this configuration.

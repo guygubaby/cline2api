@@ -2,10 +2,11 @@ FROM docker.1ms.run/golang:1.26-alpine AS builder
 
 WORKDIR /build
 
-ENV GOPROXY=https://goproxy.cn,direct
+ARG GOPROXY="https://mirrors.aliyun.com/goproxy/|https://goproxy.cn"
+ENV GOPROXY=${GOPROXY}
 
 COPY go.mod go.sum ./
-RUN go mod download
+RUN go mod download -x
 
 COPY . .
 ARG APP_VERSION=dev
