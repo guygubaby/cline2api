@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -42,7 +44,6 @@ func TestAPIKeyModelRulesAndAliases(t *testing.T) {
 func TestAPIKeyModelRuleValidation(t *testing.T) {
 	visible := []Model{{ID: "model/a"}, {ID: "model/b"}}
 	for _, rules := range [][]apiKeyModelRule{
-		nil,
 		{{ModelID: "missing"}},
 		{{ModelID: "model/a"}, {ModelID: "model/a"}},
 		{{ModelID: "model/a", Alias: "model/b"}},
@@ -52,6 +53,44 @@ func TestAPIKeyModelRuleValidation(t *testing.T) {
 		if _, err := normalizeAPIKeyModelRules(rules, visible); err == nil {
 			t.Fatalf("accepted invalid rules: %#v", rules)
 		}
+	}
+}
+
+func TestAPIKeyAllModelsTracksPublicList(t *testing.T) {
+	for _, body := range []string{
+		`{"name":"all"}`,
+		`{"name":"all","modelRules":null}`,
+		`{"name":"all","modelRules":[]}`,
+	} {
+		t.Run(body, func(t *testing.T) {
+			var input apiKeyInput
+			if err := json.Unmarshal([]byte(body), &input); err != nil {
+				t.Fatal(err)
+			}
+			for _, creating := range []bool{true, false} {
+				_, _, _, encoded, err := validateAPIKeyInput(input, creating)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(encoded) != "null" {
+					t.Fatalf("all-model rules = %s, want null", encoded)
+				}
+				var identity apiKeyIdentity
+				if err := json.Unmarshal(encoded, &identity.ModelRules); err != nil {
+					t.Fatal(err)
+				}
+				for _, visible := range [][]Model{
+					{{ID: "model/a"}},
+					{{ID: "model/a"}, {ID: "model/new"}},
+					{{ID: "model/new"}},
+					{},
+				} {
+					if listed := apiKeyListedModels(identity, visible); !slices.Equal(listed, visible) {
+						t.Fatalf("all-model list = %#v, want %#v", listed, visible)
+					}
+				}
+			}
+		})
 	}
 }
 

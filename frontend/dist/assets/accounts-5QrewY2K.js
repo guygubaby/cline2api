@@ -1,1 +1,0 @@
-import{t as e}from"./Core-_Q-5yN2A.js";var t=e;export{t as component};

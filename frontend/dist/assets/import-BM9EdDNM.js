@@ -1,0 +1,1 @@
+import{n as e}from"./Core-CLihn0cl.js";var t=e;export{t as component};

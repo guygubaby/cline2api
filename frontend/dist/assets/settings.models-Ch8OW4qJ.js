@@ -1,0 +1,1 @@
+import{i as e}from"./Settings-DSkHMyfp.js";var t=e;export{t as component};

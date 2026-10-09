@@ -14,8 +14,7 @@ import (
 	"time"
 )
 
-// A nil rule list belongs to a migrated key and retains its unrestricted behavior.
-// Newly created and edited keys always have an explicit non-empty list.
+// A nil rule list allows all models and follows the current public model list.
 type apiKeyModelRule struct {
 	ModelID string `json:"modelId"`
 	Alias   string `json:"alias"`
@@ -25,7 +24,7 @@ var apiKeyAliasPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127
 
 func normalizeAPIKeyModelRules(rules []apiKeyModelRule, visible []Model) ([]apiKeyModelRule, error) {
 	if len(rules) == 0 {
-		return nil, errors.New("select at least one model")
+		return nil, nil
 	}
 	visibleIDs := make(map[string]bool, len(visible))
 	for _, model := range visible {

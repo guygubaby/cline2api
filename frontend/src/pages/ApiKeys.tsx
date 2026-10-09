@@ -39,11 +39,13 @@ function keyStatus(key: KeyRecord, t: (value: string) => string) {
 
 function initialForm(key: KeyRecord, models: Model[]): KeyForm {
   const visibleIds = new Set(models.map(model => model.id))
+  const visibleRules = key.modelRules?.filter(rule => visibleIds.has(rule.modelId))
   return {
     name: key.name,
     expires: key.expiresAt ? dayjs(key.expiresAt).format('YYYY-MM-DD') : '',
     quotaM: key.quotaTokens === null ? '' : String(key.quotaTokens / 1_000_000),
-    modelRules: key.modelRules?.filter(rule => visibleIds.has(rule.modelId)) ?? models.map(model => ({ modelId: model.id, alias: '' })),
+    // Keep a hidden-only allowlist from silently becoming unrestricted on edit.
+    modelRules: visibleRules?.length ? visibleRules : key.modelRules ?? [],
   }
 }
 
@@ -96,7 +98,6 @@ export function ApiKeysSettingsPage() {
   }
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (!form.modelRules.length) { notify(t('请至少选择一个模型'), true); return }
     if (form.quotaM !== '' && (!Number.isFinite(Number(form.quotaM)) || Number(form.quotaM) < 0.000001 || Number(form.quotaM) > 1_000_000)) {
       notify(t('额度必须大于 0 且不超过 100 万 M'), true)
       return
@@ -147,13 +148,13 @@ export function ApiKeysSettingsPage() {
             [t('到期时间'), selected.expiresAt ? formatTime(selected.expiresAt) : t('永不过期')],
           ] as const).map(([label, value]) => <div key={label}><dt className="text-muted-foreground">{label}</dt><dd className="mt-1 font-medium">{value}</dd></div>)}</dl>
           {selected.quotaTokens !== null && <div><div className="mb-2 flex justify-between text-sm"><span>{t('额度使用进度')}</span><span>{Math.min(100, Math.round(selected.usedTokens / selected.quotaTokens * 100))}%</span></div><progress className="h-2 w-full accent-primary" max={selected.quotaTokens} value={Math.min(selected.usedTokens, selected.quotaTokens)}>{selected.usedTokens} / {selected.quotaTokens}</progress><p className="mt-1 text-xs text-muted-foreground">{t('剩余额度')}: {formatM(Math.max(0, selected.quotaTokens - selected.usedTokens))}</p></div>}
-          <div><h3 className="font-semibold">{t('可用模型')} · {selected.modelRules === null ? t('全部模型') : selected.modelRules.length}</h3>{selected.modelRules === null ? <p className="mt-2 text-sm text-muted-foreground">{t('旧版密钥不限制模型；编辑后可设置模型白名单。')}</p> : <div className="mt-3 max-h-64 space-y-2 overflow-y-auto">{selected.modelRules.map(rule => <div key={rule.modelId} className="rounded-lg border px-3 py-2 text-sm"><code className="break-all">{rule.alias || rule.modelId}</code>{rule.alias && <span className="block text-xs text-muted-foreground">→ {rule.modelId}</span>}</div>)}</div>}</div>
+          <div><h3 className="font-semibold">{t('可用模型')} · {selected.modelRules === null ? t('全部模型') : selected.modelRules.length}</h3>{selected.modelRules === null ? <p className="mt-2 text-sm text-muted-foreground">{t('模型列表自动跟随全局模型展示配置，无需逐个勾选。')}</p> : <div className="mt-3 max-h-64 space-y-2 overflow-y-auto">{selected.modelRules.map(rule => <div key={rule.modelId} className="rounded-lg border px-3 py-2 text-sm"><code className="break-all">{rule.alias || rule.modelId}</code>{rule.alias && <span className="block text-xs text-muted-foreground">→ {rule.modelId}</span>}</div>)}</div>}</div>
         </div>}
         {panel === 'detail' && selected && <SheetFooter className="flex-row justify-end border-t px-6 py-4"><Button variant="outline" onClick={() => openEdit(selected)} disabled={!!selected.revokedAt}><Pencil aria-hidden="true"/>{t('编辑')}</Button><Button variant="destructive" onClick={() => revoke(selected)} disabled={!!selected.revokedAt}><ShieldX aria-hidden="true"/>{t('吊销')}</Button></SheetFooter>}
         {(panel === 'create' || panel === 'edit') && <form onSubmit={save} className="flex min-h-0 flex-1 flex-col"><div className="grid flex-1 content-start gap-5 px-6 py-5">
           <div className="grid gap-4 sm:grid-cols-2"><label className="grid gap-2 text-sm font-medium">{t('用途名称')}<Input name="name" required maxLength={80} value={form.name} onChange={event => setForm({ ...form, name: event.target.value })} placeholder={t('例如：生产环境客户端')}/></label><label className="grid gap-2 text-sm font-medium">{t('到期日期（可选）')}<Input name="expires" type="date" min={panel === 'create' ? dayjs().format('YYYY-MM-DD') : undefined} value={form.expires} onChange={event => setForm({ ...form, expires: event.target.value })}/></label></div>
           <label className="grid gap-2 text-sm font-medium">{t('额度上限（M Token）')}<Input name="quotaM" type="number" min="0.000001" max="1000000" step="any" inputMode="decimal" value={form.quotaM} onChange={event => setForm({ ...form, quotaM: event.target.value })} placeholder={t('留空表示不限额')}/><span className="text-xs font-normal text-muted-foreground">{t('1M = 100 万 Token；达到额度后禁止新的生成请求。')}</span></label>
-          <fieldset className="min-w-0 rounded-xl border p-4"><legend className="px-1 text-sm font-semibold">{t('可用模型')} · {form.modelRules.length}</legend><p className="mb-3 text-xs text-muted-foreground">{t('模型来自当前对外可见列表；别名会出现在该密钥的 /v1/models 中。')}</p><div className="mb-3 flex flex-wrap gap-2"><Input type="search" aria-label={t('搜索模型')} className="min-w-0 flex-1" value={search} onChange={event => setSearch(event.target.value)} placeholder={t('搜索模型')}/><Button type="button" size="sm" variant="outline" onClick={selectFilteredModels}>{t('全选搜索结果')}</Button><Button type="button" size="sm" variant="outline" onClick={() => setForm({ ...form, modelRules: [] })}>{t('清空')}</Button></div>
+          <fieldset className="min-w-0 rounded-xl border p-4"><legend className="px-1 text-sm font-semibold">{t('可用模型')} · {form.modelRules.length ? form.modelRules.length : t('全部模型')}</legend><p className="mb-3 text-xs text-muted-foreground">{t('不选择模型即为全部（all），模型列表自动跟随全局模型展示配置；选择后仅允许勾选项，别名会出现在该密钥的 /v1/models 中。')}</p><div className="mb-3 flex flex-wrap gap-2"><Input type="search" aria-label={t('搜索模型')} className="min-w-0 flex-1" value={search} onChange={event => setSearch(event.target.value)} placeholder={t('搜索模型')}/><Button type="button" size="sm" variant="outline" onClick={selectFilteredModels}>{t('全选搜索结果')}</Button><Button type="button" size="sm" variant={form.modelRules.length ? 'outline' : 'default'} aria-pressed={!form.modelRules.length} onClick={() => setForm({ ...form, modelRules: [] })}>{t('全部模型（all）')}</Button></div>
             {modelsQuery.error && <p role="alert" className="text-sm text-destructive">{modelsQuery.error.message}</p>}
             <div className="max-h-80 space-y-1 overflow-y-auto pr-1">{filteredModels.map(model => { const rule = form.modelRules.find(item => item.modelId === model.id); return <div key={model.id} className="rounded-lg border p-3"><label className="flex min-w-0 items-center gap-3 text-sm"><input type="checkbox" name="model" value={model.id} checked={!!rule} onChange={event => toggleModel(model.id, event.target.checked)} className="size-4 accent-primary"/><span className="min-w-0 flex-1 break-all font-mono">{model.id}</span>{model.cost && <span className="text-xs text-muted-foreground">{model.cost}</span>}</label>{rule && <label className="mt-3 grid gap-1 pl-7 text-xs text-muted-foreground">{t('模型别名（可选）')}<Input name={`alias-${model.id}`} value={rule.alias} onChange={event => setAlias(model.id, event.target.value)} maxLength={128} placeholder={model.id} className="font-mono text-sm"/></label>}</div> })}{!filteredModels.length && <p className="py-6 text-center text-sm text-muted-foreground">{modelsQuery.isLoading ? t('加载中…') : t('暂无可用模型')}</p>}</div>
           </fieldset>

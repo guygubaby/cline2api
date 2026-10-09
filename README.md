@@ -116,7 +116,7 @@ Model:    z-ai/glm-5.3-flash
 
 鉴权同时接受 OpenAI 的 `Authorization: Bearer <key>` 和 Anthropic 的 `x-api-key: <key>`；Anthropic SDK 可照常发送 `anthropic-version`、`anthropic-beta` 请求头。
 
-API Key 的模型候选来自当前 `/v1/models` 对外可见列表。设置别名后，该密钥的模型列表展示别名；客户端用别名或原模型 ID 调用时都会路由到原模型。额度按累计总 Token 计算（1M = 1,000,000 Token）；优先使用上游返回的 usage，缺少 usage 的已完成请求按输入量估算。详情中的计量请求仅统计有实际或估算用量的调用。额度到达后拒绝新的生成请求，已经开始的并发请求可能使最终用量略超额度。旧版密钥保留原有不限模型、不限额度行为，编辑后可设置限制。
+API Key 的模型候选来自当前 `/v1/models` 对外可见列表。不选择模型或点击“全部模型（all）”表示不限制模型，该密钥的 `/v1/models` 自动跟随全局模型展示配置；逐个勾选则使用固定白名单。设置别名后，该密钥的模型列表展示别名；客户端用别名或原模型 ID 调用时都会路由到原模型。额度按累计总 Token 计算（1M = 1,000,000 Token）；优先使用上游返回的 usage，缺少 usage 的已完成请求按输入量估算。详情中的计量请求仅统计有实际或估算用量的调用。额度到达后拒绝新的生成请求，已经开始的并发请求可能使最终用量略超额度。旧版密钥保留原有不限模型、不限额度行为，编辑后可设置限制。
 
 > 上游实际是 Chat Completions，因此无法可靠模拟需要厂商服务端状态或托管执行环境的功能。OpenAI 的 `background`、`previous_response_id`、`conversation`、托管工具，以及 Anthropic 的服务端工具、容器/Skill 等请求会返回标准错误，不会静默丢弃。Responses 可通过在下一次 `input` 中回传之前的 output items 实现无状态多轮调用。
 

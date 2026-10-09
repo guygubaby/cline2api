@@ -258,9 +258,6 @@ func validAPIKey(ctx context.Context, key string) (apiKeyIdentity, error) {
 		if err := json.Unmarshal(modelRules, &identity.ModelRules); err != nil {
 			return apiKeyIdentity{}, fmt.Errorf("decode API key model rules: %w", err)
 		}
-		if identity.ModelRules == nil {
-			identity.ModelRules = []apiKeyModelRule{}
-		}
 	}
 	// Updating at most once per minute keeps last-used useful without a write on every call.
 	_, _ = authDB.ExecContext(ctx, `UPDATE api_keys SET last_used_at=now() WHERE id=$1 AND (last_used_at IS NULL OR last_used_at<now()-interval '1 minute')`, identity.ID)
